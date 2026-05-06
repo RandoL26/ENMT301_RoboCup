@@ -35,6 +35,13 @@ all: clean build
 
 # Quick aliases
 b: build
+	@$(MAKE) build
+
 u: upload
+	@$(MAKE) upload
+
 m: monitor
+	@$(MAKE) monitor
+
 bm: build-monitor
+	@$(MAKE) build-monitor
