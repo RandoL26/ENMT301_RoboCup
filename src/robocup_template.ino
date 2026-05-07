@@ -16,11 +16,12 @@
 //#include <Herkulex.h>             //smart servo
 #include <Adafruit_TCS34725.h>      //colour sensor
 #include <Wire.h>                   //for I2C and SPI
-#include <TaskScheduler.h>          //scheduler 
+#include <TaskScheduler.h>          //scheduler
+#include "BNO055_support.h"         //IMU sensor 
 
 // Custom headers
 #include "motors.h"
-#include "sensors.h"
+#include "imu_sensor.h"
 #include "weight_collection.h"
 #include "return_to_base.h" 
 
@@ -33,6 +34,7 @@
 #define US_READ_TASK_PERIOD                 40
 #define IR_READ_TASK_PERIOD                 40
 #define COLOUR_READ_TASK_PERIOD             40
+#define IMU_READ_TASK_PERIOD                10
 #define SENSOR_AVERAGE_PERIOD               40
 #define SET_MOTOR_TASK_PERIOD               40
 #define WEIGHT_SCAN_TASK_PERIOD             40
@@ -51,6 +53,7 @@
 #define US_READ_TASK_NUM_EXECUTE           -1
 #define IR_READ_TASK_NUM_EXECUTE           -1
 #define COLOUR_READ_TASK_NUM_EXECUTE       -1
+#define IMU_READ_TASK_NUM_EXECUTE          -1
 #define SENSOR_AVERAGE_NUM_EXECUTE         -1
 #define SET_MOTOR_TASK_NUM_EXECUTE         -1
 #define WEIGHT_SCAN_TASK_NUM_EXECUTE       -1
@@ -65,10 +68,34 @@
 #define IO_POWER  49
 
 // Serial deffinitions
-#define BAUD_RATE 9600
+#define BAUD_RATE 115200
 
 Servo right_motor;
 Servo left_motor;
+
+// BNO055 IMU structure
+struct bno055_t bno055;
+
+// Global IMU data storage (for inter-task communication)
+IMU_Data current_imu_data;
+
+// Task wrapper for IMU reading
+void imu_task_callback(void) {
+    current_imu_data = read_imu();
+    // Print IMU data to serial
+    Serial.print("Raw Gyro X:");
+    Serial.print(current_imu_data.gyro_x);
+    Serial.print(" Y:");
+    Serial.print(current_imu_data.gyro_y);
+    Serial.print(" Z:");
+    Serial.print(current_imu_data.gyro_z);
+    Serial.print(" | Accel: ");
+    Serial.print(current_imu_data.accel_x);
+    Serial.print(", ");
+    Serial.print(current_imu_data.accel_y);
+    Serial.print(", ");
+    Serial.println(current_imu_data.accel_z);
+}
 
 
 //**********************************************************************************
@@ -82,6 +109,7 @@ Servo left_motor;
 Task tRead_ultrasonic(US_READ_TASK_PERIOD,       US_READ_TASK_NUM_EXECUTE,        &read_ultrasonic);
 Task tRead_infrared(IR_READ_TASK_PERIOD,         IR_READ_TASK_NUM_EXECUTE,        &read_infrared);
 Task tRead_colour(COLOUR_READ_TASK_PERIOD,       COLOUR_READ_TASK_NUM_EXECUTE,    &read_colour);
+Task tRead_imu(IMU_READ_TASK_PERIOD,             IMU_READ_TASK_NUM_EXECUTE,       &imu_task_callback);
 Task tSensor_average(SENSOR_AVERAGE_PERIOD,      SENSOR_AVERAGE_NUM_EXECUTE,      &sensor_average);
 
 // Task to set the motor speeds and direction
@@ -114,10 +142,10 @@ void task_init();
 //**********************************************************************************
 void setup() {
   Serial.begin(BAUD_RATE);
+  Wire.begin();        // MUST be called FIRST - before any I2C operations
   pin_init();
-  robot_init();
+  robot_init();        // robot_init() calls BNO_Init() which needs I2C
   task_init();
-  Wire.begin();
 }
 
 //**********************************************************************************
@@ -136,7 +164,25 @@ void pin_init(){
 // Set default robot state
 //**********************************************************************************
 void robot_init() {
-    Serial.println("Robot is ready \n");
+    Serial.println("Initialising IMU (BNO055)...");
+    BNO055_RETURN_FUNCTION_TYPE init_result = BNO_Init(&bno055);
+    
+    if (init_result == SUCCESS) {
+        Serial.println("IMU initialised successfully");
+        delay(500);
+        
+        // Set operation mode to NDOF (Nine Degrees of Freedom)
+        bno055_set_operation_mode(OPERATION_MODE_NDOF);
+        delay(50);  // Wait for mode transition
+        
+        // Calibrate gyroscope to zero on startup
+        calibrate_gyroscope();
+        
+        Serial.println("Robot is ready \n");
+    } else {
+        Serial.print("ERROR: Failed to initialise IMU! Error code: ");
+        Serial.println(init_result);
+    }
 }
 
 //**********************************************************************************
@@ -148,16 +194,17 @@ void task_init() {
   taskManager.init();     
  
   // Add tasks to the scheduler
-  taskManager.addTask(tRead_ultrasonic);   //reading ultrasonic 
-  taskManager.addTask(tRead_infrared);
-  taskManager.addTask(tRead_colour);
-  taskManager.addTask(tSensor_average);
-  taskManager.addTask(tSet_motor); 
-  taskManager.addTask(tWeight_scan);
-  taskManager.addTask(tCollect_weight);
-  taskManager.addTask(tReturn_to_base);
-  taskManager.addTask(tDetect_base);
-  taskManager.addTask(tUnload_weights);
+  // taskManager.addTask(tRead_ultrasonic);   //reading ultrasonic 
+  // taskManager.addTask(tRead_infrared);
+  // taskManager.addTask(tRead_colour);
+  taskManager.addTask(tRead_imu);          //reading IMU
+  // taskManager.addTask(tSensor_average);
+  // taskManager.addTask(tSet_motor); 
+  // taskManager.addTask(tWeight_scan);
+  // taskManager.addTask(tCollect_weight);
+  // taskManager.addTask(tReturn_to_base);
+  // taskManager.addTask(tDetect_base);
+  // taskManager.addTask(tUnload_weights);
 
   //taskManager.addTask(tCheck_watchdog);
   //taskManager.addTask(tVictory_dance);      
@@ -166,6 +213,7 @@ void task_init() {
   tRead_ultrasonic.enable();
   tRead_infrared.enable();
   tRead_colour.enable();
+  tRead_imu.enable();
   tSensor_average.enable();
   tSet_motor.enable();
   tWeight_scan.enable();
@@ -187,5 +235,5 @@ void task_init() {
 void loop() {
   
   taskManager.execute();    //execute the scheduler
-  Serial.println("Another scheduler execution cycle has oocured \n");
+  //Serial.println("Another scheduler execution cycle has oocured \n");
 }

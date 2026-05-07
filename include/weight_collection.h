@@ -14,7 +14,7 @@
 #include <Wire.h>                   //for I2C and SPI
 
 
-#include "sensors.h"               //will need sensor library to detect weights
+#include "imu_sensor.h"           //will need sensor library to detect weights
 
 
 //states for swapping between searching and collecting
