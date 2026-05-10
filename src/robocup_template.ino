@@ -24,7 +24,8 @@
 #include "imu_sensor.h"
 #include "weight_collection.h"
 #include "return_to_base.h"
-#include "proximity_sensor.h"       //inductive proximity sensor 
+#include "proximity_sensor.h"       //inductive proximity sensor
+#include "ultrasonic_sensor.h"      //ultrasonic distance sensor 
 
 //**********************************************************************************
 // Local Definitions
@@ -46,6 +47,7 @@
 #define CHECK_WATCHDOG_TASK_PERIOD          40
 #define VICTORY_DANCE_TASK_PERIOD           40
 #define PROXIMITY_SENSOR_READ_PERIOD        40
+#define ULTRASONIC_SENSOR_READ_PERIOD       100
 
 
 
@@ -66,10 +68,13 @@
 #define CHECK_WATCHDOG_TASK_NUM_EXECUTE    -1
 #define VICTORY_DANCE_TASK_NUM_EXECUTE     -1
 #define PROXIMITY_SENSOR_NUM_EXECUTE        -1
+#define ULTRASONIC_SENSOR_NUM_EXECUTE       -1
 
 // Pin deffinitions
 #define IO_POWER  49
 #define PROXIMITY_SENSOR_PIN  20  // A6Z
+#define ULTRASONIC_TRIGGER_PIN  2   // D2Z
+#define ULTRASONIC_ECHO_PIN  3      // D3Z
 
 // Serial deffinitions
 #define BAUD_RATE 115200
@@ -86,10 +91,19 @@ IMU_Data current_imu_data;
 // Proximity Sensor instance
 ProximitySensor proximitySensor(PROXIMITY_SENSOR_PIN);
 
+// Ultrasonic Sensor instance
+UltrasonicSensor ultrasonicSensor(ULTRASONIC_TRIGGER_PIN, ULTRASONIC_ECHO_PIN);
+
 // Task wrapper for proximity sensor reading
 void proximity_sensor_callback(void) {
     proximitySensor.update();
     proximitySensor.printStatus();
+}
+
+// Task wrapper for ultrasonic sensor reading
+void ultrasonic_sensor_callback(void) {
+    ultrasonicSensor.update();
+    ultrasonicSensor.printStatus();
 }
 
 // Task wrapper for IMU reading
@@ -124,6 +138,7 @@ Task tRead_infrared(IR_READ_TASK_PERIOD,         IR_READ_TASK_NUM_EXECUTE,      
 Task tRead_colour(COLOUR_READ_TASK_PERIOD,       COLOUR_READ_TASK_NUM_EXECUTE,    &read_colour);
 Task tRead_imu(IMU_READ_TASK_PERIOD,             IMU_READ_TASK_NUM_EXECUTE,       &imu_task_callback);
 Task tProximity_sensor(PROXIMITY_SENSOR_READ_PERIOD, PROXIMITY_SENSOR_NUM_EXECUTE,  &proximity_sensor_callback);
+Task tUltrasonic_sensor(ULTRASONIC_SENSOR_READ_PERIOD, ULTRASONIC_SENSOR_NUM_EXECUTE, &ultrasonic_sensor_callback);
 Task tSensor_average(SENSOR_AVERAGE_PERIOD,      SENSOR_AVERAGE_NUM_EXECUTE,      &sensor_average);
 
 // Task to set the motor speeds and direction
@@ -156,6 +171,8 @@ void task_init();
 //**********************************************************************************
 void setup() {
   Serial.begin(BAUD_RATE);
+  delay(2000);  // Give USB serial time to stabilize
+  Serial.println("\n\n=== RoboCup Robot Starting ===");
   Wire.begin();        // MUST be called FIRST - before any I2C operations
   pin_init();
   robot_init();        // robot_init() calls BNO_Init() which needs I2C
@@ -180,6 +197,9 @@ void pin_init(){
 void robot_init() {
     Serial.println("Initialising Proximity Sensor...");
     proximitySensor.begin();
+    
+    Serial.println("Initialising Ultrasonic Sensor...");
+    ultrasonicSensor.begin();
     
     Serial.println("Initialising IMU (BNO055)...");
     BNO055_RETURN_FUNCTION_TYPE init_result = BNO_Init(&bno055);
@@ -216,6 +236,7 @@ void task_init() {
   // taskManager.addTask(tRead_colour);
 //   taskManager.addTask(tRead_imu);          //reading IMU
   taskManager.addTask(tProximity_sensor);  //reading proximity sensor
+    // taskManager.addTask(tUltrasonic_sensor);  //reading ultrasonic sensor
   // taskManager.addTask(tSensor_average);
   // taskManager.addTask(tSet_motor); 
   // taskManager.addTask(tWeight_scan);
@@ -233,6 +254,7 @@ void task_init() {
   tRead_colour.enable();
   tRead_imu.enable();
   tProximity_sensor.enable();
+  tUltrasonic_sensor.enable();
   tSensor_average.enable();
   tSet_motor.enable();
   tWeight_scan.enable();
