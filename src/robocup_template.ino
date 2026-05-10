@@ -23,7 +23,8 @@
 #include "motors.h"
 #include "imu_sensor.h"
 #include "weight_collection.h"
-#include "return_to_base.h" 
+#include "return_to_base.h"
+#include "proximity_sensor.h"       //inductive proximity sensor 
 
 //**********************************************************************************
 // Local Definitions
@@ -44,6 +45,7 @@
 #define UNLOAD_WEIGHTS_TASK_PERIOD          40
 #define CHECK_WATCHDOG_TASK_PERIOD          40
 #define VICTORY_DANCE_TASK_PERIOD           40
+#define PROXIMITY_SENSOR_READ_PERIOD        40
 
 
 
@@ -63,9 +65,11 @@
 #define UNLOAD_WEIGHTS_TASK_NUM_EXECUTE    -1
 #define CHECK_WATCHDOG_TASK_NUM_EXECUTE    -1
 #define VICTORY_DANCE_TASK_NUM_EXECUTE     -1
+#define PROXIMITY_SENSOR_NUM_EXECUTE        -1
 
 // Pin deffinitions
 #define IO_POWER  49
+#define PROXIMITY_SENSOR_PIN  20  // A6Z
 
 // Serial deffinitions
 #define BAUD_RATE 115200
@@ -78,6 +82,15 @@ struct bno055_t bno055;
 
 // Global IMU data storage (for inter-task communication)
 IMU_Data current_imu_data;
+
+// Proximity Sensor instance
+ProximitySensor proximitySensor(PROXIMITY_SENSOR_PIN);
+
+// Task wrapper for proximity sensor reading
+void proximity_sensor_callback(void) {
+    proximitySensor.update();
+    proximitySensor.printStatus();
+}
 
 // Task wrapper for IMU reading
 void imu_task_callback(void) {
@@ -110,6 +123,7 @@ Task tRead_ultrasonic(US_READ_TASK_PERIOD,       US_READ_TASK_NUM_EXECUTE,      
 Task tRead_infrared(IR_READ_TASK_PERIOD,         IR_READ_TASK_NUM_EXECUTE,        &read_infrared);
 Task tRead_colour(COLOUR_READ_TASK_PERIOD,       COLOUR_READ_TASK_NUM_EXECUTE,    &read_colour);
 Task tRead_imu(IMU_READ_TASK_PERIOD,             IMU_READ_TASK_NUM_EXECUTE,       &imu_task_callback);
+Task tProximity_sensor(PROXIMITY_SENSOR_READ_PERIOD, PROXIMITY_SENSOR_NUM_EXECUTE,  &proximity_sensor_callback);
 Task tSensor_average(SENSOR_AVERAGE_PERIOD,      SENSOR_AVERAGE_NUM_EXECUTE,      &sensor_average);
 
 // Task to set the motor speeds and direction
@@ -164,6 +178,9 @@ void pin_init(){
 // Set default robot state
 //**********************************************************************************
 void robot_init() {
+    Serial.println("Initialising Proximity Sensor...");
+    proximitySensor.begin();
+    
     Serial.println("Initialising IMU (BNO055)...");
     BNO055_RETURN_FUNCTION_TYPE init_result = BNO_Init(&bno055);
     
@@ -197,7 +214,8 @@ void task_init() {
   // taskManager.addTask(tRead_ultrasonic);   //reading ultrasonic 
   // taskManager.addTask(tRead_infrared);
   // taskManager.addTask(tRead_colour);
-  taskManager.addTask(tRead_imu);          //reading IMU
+//   taskManager.addTask(tRead_imu);          //reading IMU
+  taskManager.addTask(tProximity_sensor);  //reading proximity sensor
   // taskManager.addTask(tSensor_average);
   // taskManager.addTask(tSet_motor); 
   // taskManager.addTask(tWeight_scan);
@@ -214,6 +232,7 @@ void task_init() {
   tRead_infrared.enable();
   tRead_colour.enable();
   tRead_imu.enable();
+  tProximity_sensor.enable();
   tSensor_average.enable();
   tSet_motor.enable();
   tWeight_scan.enable();
