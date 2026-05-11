@@ -28,12 +28,7 @@ void UltrasonicSensor::begin() {
 
 // Read sensor value - using simple timing method instead of HCSR04 library
 void UltrasonicSensor::update() {
-    // Check echo pin state before measurement
-    Serial.print("Echo pin (");
-    Serial.print(echoPin);
-    Serial.print(") BEFORE: ");
-    Serial.println(digitalRead(echoPin));
-    
+
     // Ensure trigger is LOW for 2us
     digitalWrite(triggerPin, LOW);
     delayMicroseconds(2);
@@ -43,31 +38,25 @@ void UltrasonicSensor::update() {
     delayMicroseconds(10);
     digitalWrite(triggerPin, LOW);
     
-    // Small delay after trigger
-    delayMicroseconds(10);
+    // Wait for echo to settle (sensor needs time to respond)
+    delayMicroseconds(100);
     
-    // Check echo pin state after trigger
-    Serial.print("Echo pin AFTER trigger: ");
-    Serial.println(digitalRead(echoPin));
     
-    // Measure pulse duration on echo pin
-    // pulseIn will wait for pin to go HIGH, then measure time until it goes LOW
-    long duration = pulseIn(echoPin, HIGH, 30000);  // 30ms timeout
+        // Measure pulse duration on echo pin
+        // pulseIn will wait for pin to go HIGH, then measure time until it goes LOW
+        long duration = pulseIn(echoPin, HIGH, 30000);  // 30ms timeout
+        
+        // Calculate distance: distance = (duration * 0.0343) / 2
+        if (duration > 0) {
+            lastDistance = (duration * 0.0343) / 2.0;
+            Serial.print("DEBUG: Calculated distance = ");
+            Serial.print(lastDistance);
+            Serial.println(" cm");
+        } else {
+            Serial.println("DEBUG: No echo received (timeout)");
+            lastDistance = 0;
+        }
     
-    Serial.print("DEBUG: Pulse duration = ");
-    Serial.print(duration);
-    Serial.println(" microseconds");
-    
-    // Calculate distance: distance = (duration * 0.0343) / 2
-    if (duration > 0) {
-        lastDistance = (duration * 0.0343) / 2.0;
-        Serial.print("DEBUG: Calculated distance = ");
-        Serial.print(lastDistance);
-        Serial.println(" cm");
-    } else {
-        Serial.println("DEBUG: No echo received (timeout)");
-        lastDistance = 0;
-    }
     
     // Delay before next measurement (HC-SR04 needs ~60ms between measurements)
     delay(75);
@@ -78,27 +67,10 @@ double UltrasonicSensor::getDistanceCm() const {
     return lastDistance;
 }
 
-// Print visual bar graph
-void UltrasonicSensor::printVisualBar() const {
-    // Scale: 1 character per 2 cm (max 40 cm = 20 chars)
-    int barLength = (int)(lastDistance / 2);
-    if (barLength > 20) barLength = 20;
-    
-    Serial.print("[");
-    for (int i = 0; i < barLength; i++) {
-        Serial.print("=");
-    }
-    for (int i = barLength; i < 20; i++) {
-        Serial.print(" ");
-    }
-    Serial.print("]");
-}
-
 // Print sensor status with visual representation
 void UltrasonicSensor::printStatus() const {
     Serial.print("Distance: ");
     Serial.print(lastDistance, 1);
     Serial.print(" cm  ");
-    printVisualBar();
     Serial.println();
 }

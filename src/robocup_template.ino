@@ -73,8 +73,8 @@
 // Pin deffinitions
 #define IO_POWER  49
 #define PROXIMITY_SENSOR_PIN  20  // A6Z
-#define ULTRASONIC_TRIGGER_PIN  2   // D2Z
-#define ULTRASONIC_ECHO_PIN  3      // D3Z
+#define ULTRASONIC_TRIGGER_PIN  3   // D2Z
+#define ULTRASONIC_ECHO_PIN  2      // D3Z
 
 // Serial deffinitions
 #define BAUD_RATE 115200
@@ -235,8 +235,8 @@ void task_init() {
   // taskManager.addTask(tRead_infrared);
   // taskManager.addTask(tRead_colour);
 //   taskManager.addTask(tRead_imu);          //reading IMU
-  taskManager.addTask(tProximity_sensor);  //reading proximity sensor
-    // taskManager.addTask(tUltrasonic_sensor);  //reading ultrasonic sensor
+//   taskManager.addTask(tProximity_sensor);  //reading proximity sensor
+    taskManager.addTask(tUltrasonic_sensor);  //reading ultrasonic sensor
   // taskManager.addTask(tSensor_average);
   // taskManager.addTask(tSet_motor); 
   // taskManager.addTask(tWeight_scan);
