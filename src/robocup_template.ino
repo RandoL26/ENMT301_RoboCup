@@ -17,6 +17,7 @@
 #include <Adafruit_TCS34725.h>      //colour sensor
 #include <Wire.h>                   //for I2C and SPI
 #include <TaskScheduler.h>          //scheduler
+#include <VL53L1X.h>                //VL53L1X distance sensor
 #include "BNO055_support.h"         //IMU sensor 
 
 // Custom headers
@@ -48,6 +49,7 @@
 #define VICTORY_DANCE_TASK_PERIOD           40
 #define PROXIMITY_SENSOR_READ_PERIOD        40
 #define ULTRASONIC_SENSOR_READ_PERIOD       100
+#define VL53L1X_SENSOR_READ_PERIOD          100
 
 
 
@@ -69,12 +71,18 @@
 #define VICTORY_DANCE_TASK_NUM_EXECUTE     -1
 #define PROXIMITY_SENSOR_NUM_EXECUTE        -1
 #define ULTRASONIC_SENSOR_NUM_EXECUTE       -1
+#define VL53L1X_SENSOR_NUM_EXECUTE          -1
 
 // Pin deffinitions
 #define IO_POWER  49
 #define PROXIMITY_SENSOR_PIN  20  // A6Z
 #define ULTRASONIC_TRIGGER_PIN  3   // D2Z
 #define ULTRASONIC_ECHO_PIN  2      // D3Z
+
+
+// VL53L1X sensor configuration
+const uint8_t VL53L1X_SENSOR_COUNT = 1;  // Update this if you add more sensors
+const uint8_t VL53L1X_XSHUT_PINS[VL53L1X_SENSOR_COUNT] = { 18 };  // Update this with the XSHUT pins for each sensor
 
 // Serial deffinitions
 #define BAUD_RATE 115200
@@ -94,6 +102,9 @@ ProximitySensor proximitySensor(PROXIMITY_SENSOR_PIN);
 // Ultrasonic Sensor instance
 UltrasonicSensor ultrasonicSensor(ULTRASONIC_TRIGGER_PIN, ULTRASONIC_ECHO_PIN);
 
+// VL53L1X Sensors array
+VL53L1X VL53L1X_sensors[VL53L1X_SENSOR_COUNT];
+
 // Task wrapper for proximity sensor reading
 void proximity_sensor_callback(void) {
     proximitySensor.update();
@@ -104,6 +115,18 @@ void proximity_sensor_callback(void) {
 void ultrasonic_sensor_callback(void) {
     ultrasonicSensor.update();
     ultrasonicSensor.printStatus();
+}
+
+// Task wrapper for VL53L1X sensor reading
+void vl53l1x_sensor_callback(void) {
+    for (uint8_t i = 0; i < VL53L1X_SENSOR_COUNT; i++) {
+        Serial.print(VL53L1X_sensors[i].read());
+        if (VL53L1X_sensors[i].timeoutOccurred()) { 
+            Serial.print(" TIMEOUT"); 
+        }
+        Serial.print('\t');
+    }
+    Serial.println();
 }
 
 // Task wrapper for IMU reading
@@ -139,6 +162,7 @@ Task tRead_colour(COLOUR_READ_TASK_PERIOD,       COLOUR_READ_TASK_NUM_EXECUTE,  
 Task tRead_imu(IMU_READ_TASK_PERIOD,             IMU_READ_TASK_NUM_EXECUTE,       &imu_task_callback);
 Task tProximity_sensor(PROXIMITY_SENSOR_READ_PERIOD, PROXIMITY_SENSOR_NUM_EXECUTE,  &proximity_sensor_callback);
 Task tUltrasonic_sensor(ULTRASONIC_SENSOR_READ_PERIOD, ULTRASONIC_SENSOR_NUM_EXECUTE, &ultrasonic_sensor_callback);
+Task tVL53L1X_sensor(VL53L1X_SENSOR_READ_PERIOD, VL53L1X_SENSOR_NUM_EXECUTE, &vl53l1x_sensor_callback);
 Task tSensor_average(SENSOR_AVERAGE_PERIOD,      SENSOR_AVERAGE_NUM_EXECUTE,      &sensor_average);
 
 // Task to set the motor speeds and direction
@@ -201,6 +225,40 @@ void robot_init() {
     Serial.println("Initialising Ultrasonic Sensor...");
     ultrasonicSensor.begin();
     
+    Serial.println("Initialising VL53L1X Sensors...");
+    Wire.setClock(400000); // use 400 kHz I2C
+    
+    // Disable/reset all VL53L1X sensors by driving their XSHUT pins low.
+    for (uint8_t i = 0; i < VL53L1X_SENSOR_COUNT; i++) {
+        pinMode(VL53L1X_XSHUT_PINS[i], OUTPUT);
+        digitalWrite(VL53L1X_XSHUT_PINS[i], LOW);
+    }
+    
+    // Enable, initialize, and start each VL53L1X sensor, one by one.
+    for (uint8_t i = 0; i < VL53L1X_SENSOR_COUNT; i++) {
+        // Stop driving this sensor's XSHUT low. This should allow the carrier
+        // board to pull it high. (We do NOT want to drive XSHUT high since it is
+        // not level shifted.) Then wait a bit for the sensor to start up.
+        pinMode(VL53L1X_XSHUT_PINS[i], INPUT);
+        delay(10);
+
+        VL53L1X_sensors[i].setTimeout(500);
+        if (!VL53L1X_sensors[i].init()) {
+            Serial.print("WARNING: Failed to detect and initialize VL53L1X sensor ");
+            Serial.println(i);
+            continue;  // Continue initialization of other sensors
+        }
+
+        // Each sensor must have its address changed to a unique value other than
+        // the default of 0x29 (except for the last one, which could be left at
+        // the default). To make it simple, we'll just count up from 0x2A.
+        VL53L1X_sensors[i].setAddress(0x2A + i);
+        VL53L1X_sensors[i].startContinuous(50);
+        Serial.print("VL53L1X sensor ");
+        Serial.print(i);
+        Serial.println(" initialized successfully");
+    }
+    
     Serial.println("Initialising IMU (BNO055)...");
     BNO055_RETURN_FUNCTION_TYPE init_result = BNO_Init(&bno055);
     
@@ -236,8 +294,9 @@ void task_init() {
   // taskManager.addTask(tRead_colour);
 //   taskManager.addTask(tRead_imu);          //reading IMU
 //   taskManager.addTask(tProximity_sensor);  //reading proximity sensor
-    taskManager.addTask(tUltrasonic_sensor);  //reading ultrasonic sensor
-  // taskManager.addTask(tSensor_average);
+    // taskManager.addTask(tUltrasonic_sensor);  //reading ultrasonic sensor    
+    taskManager.addTask(tVL53L1X_sensor);     //reading VL53L1X sensors  
+    taskManager.addTask(tSensor_average);
   // taskManager.addTask(tSet_motor); 
   // taskManager.addTask(tWeight_scan);
   // taskManager.addTask(tCollect_weight);
@@ -255,6 +314,7 @@ void task_init() {
   tRead_imu.enable();
   tProximity_sensor.enable();
   tUltrasonic_sensor.enable();
+  tVL53L1X_sensor.enable();
   tSensor_average.enable();
   tSet_motor.enable();
   tWeight_scan.enable();
