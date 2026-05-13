@@ -26,7 +26,10 @@
 #include "weight_collection.h"
 #include "return_to_base.h"
 #include "proximity_sensor.h"       //inductive proximity sensor
-#include "ultrasonic_sensor.h"      //ultrasonic distance sensor 
+#include "ultrasonic_sensor.h"      //ultrasonic distance sensor
+#include "color_sensor.h"           //colour sensor module
+#include "ir_xy_position.h"         //IR XY position sensor
+#include "tof_sensor_array.h"       //TOF (VL53L1X) sensor array 
 
 //**********************************************************************************
 // Local Definitions
@@ -102,8 +105,14 @@ ProximitySensor proximitySensor(PROXIMITY_SENSOR_PIN);
 // Ultrasonic Sensor instance
 UltrasonicSensor ultrasonicSensor(ULTRASONIC_TRIGGER_PIN, ULTRASONIC_ECHO_PIN);
 
-// VL53L1X Sensors array
-VL53L1X VL53L1X_sensors[VL53L1X_SENSOR_COUNT];
+// Color Sensor instance
+ColorSensor colorSensor;
+
+// IR XY Position Sensor instance
+IRXYPosition irXYSensor;
+
+// TOF Sensor Array instance
+TOFSensorArray tofSensorArray(VL53L1X_SENSOR_COUNT);
 
 // Task wrapper for proximity sensor reading
 void proximity_sensor_callback(void) {
@@ -117,16 +126,28 @@ void ultrasonic_sensor_callback(void) {
     ultrasonicSensor.printStatus();
 }
 
+// Task wrapper for color sensor reading
+void color_sensor_callback(void) {
+    if (colorSensor.isInitialized()) {
+        ColorSensor::ColorData colorData = colorSensor.readColor();
+        colorSensor.printColorData(colorData);
+    }
+}
+
+// Task wrapper for IR XY position sensor reading
+void ir_xy_position_callback(void) {
+    if (irXYSensor.isInitialized()) {
+        IRXYPosition::IRData irData = irXYSensor.readPositions();
+        irXYSensor.printPositions(irData);
+    }
+}
+
 // Task wrapper for VL53L1X sensor reading
 void vl53l1x_sensor_callback(void) {
-    for (uint8_t i = 0; i < VL53L1X_SENSOR_COUNT; i++) {
-        Serial.print(VL53L1X_sensors[i].read());
-        if (VL53L1X_sensors[i].timeoutOccurred()) { 
-            Serial.print(" TIMEOUT"); 
-        }
-        Serial.print('\t');
+    if (tofSensorArray.isInitialized()) {
+        TOFSensorArray::TOFData tofData = tofSensorArray.readDistances();
+        tofSensorArray.printDistances(tofData);
     }
-    Serial.println();
 }
 
 // Task wrapper for IMU reading
@@ -162,6 +183,8 @@ Task tRead_colour(COLOUR_READ_TASK_PERIOD,       COLOUR_READ_TASK_NUM_EXECUTE,  
 Task tRead_imu(IMU_READ_TASK_PERIOD,             IMU_READ_TASK_NUM_EXECUTE,       &imu_task_callback);
 Task tProximity_sensor(PROXIMITY_SENSOR_READ_PERIOD, PROXIMITY_SENSOR_NUM_EXECUTE,  &proximity_sensor_callback);
 Task tUltrasonic_sensor(ULTRASONIC_SENSOR_READ_PERIOD, ULTRASONIC_SENSOR_NUM_EXECUTE, &ultrasonic_sensor_callback);
+Task tColor_sensor(COLOUR_READ_TASK_PERIOD, COLOUR_READ_TASK_NUM_EXECUTE, &color_sensor_callback);
+Task tIR_XY_Position(IR_READ_TASK_PERIOD, IR_READ_TASK_NUM_EXECUTE, &ir_xy_position_callback);
 Task tVL53L1X_sensor(VL53L1X_SENSOR_READ_PERIOD, VL53L1X_SENSOR_NUM_EXECUTE, &vl53l1x_sensor_callback);
 Task tSensor_average(SENSOR_AVERAGE_PERIOD,      SENSOR_AVERAGE_NUM_EXECUTE,      &sensor_average);
 
@@ -225,38 +248,23 @@ void robot_init() {
     Serial.println("Initialising Ultrasonic Sensor...");
     ultrasonicSensor.begin();
     
-    Serial.println("Initialising VL53L1X Sensors...");
+    Serial.println("Initialising Color Sensor...");
+    colorSensor.begin();
+    
+    Serial.println("Initialising IR XY Position Sensor...");
+    irXYSensor.begin();
+    
+    Serial.println("Initialising TOF (VL53L1X) Sensor Array...");
     Wire.setClock(400000); // use 400 kHz I2C
     
-    // Disable/reset all VL53L1X sensors by driving their XSHUT pins low.
-    for (uint8_t i = 0; i < VL53L1X_SENSOR_COUNT; i++) {
-        pinMode(VL53L1X_XSHUT_PINS[i], OUTPUT);
-        digitalWrite(VL53L1X_XSHUT_PINS[i], LOW);
-    }
+    // Set XSHUT pins for each sensor
+    tofSensorArray.setXSHUTPins(VL53L1X_XSHUT_PINS, VL53L1X_SENSOR_COUNT);
     
-    // Enable, initialize, and start each VL53L1X sensor, one by one.
-    for (uint8_t i = 0; i < VL53L1X_SENSOR_COUNT; i++) {
-        // Stop driving this sensor's XSHUT low. This should allow the carrier
-        // board to pull it high. (We do NOT want to drive XSHUT high since it is
-        // not level shifted.) Then wait a bit for the sensor to start up.
-        pinMode(VL53L1X_XSHUT_PINS[i], INPUT);
-        delay(10);
-
-        VL53L1X_sensors[i].setTimeout(500);
-        if (!VL53L1X_sensors[i].init()) {
-            Serial.print("WARNING: Failed to detect and initialize VL53L1X sensor ");
-            Serial.println(i);
-            continue;  // Continue initialization of other sensors
-        }
-
-        // Each sensor must have its address changed to a unique value other than
-        // the default of 0x29 (except for the last one, which could be left at
-        // the default). To make it simple, we'll just count up from 0x2A.
-        VL53L1X_sensors[i].setAddress(0x2A + i);
-        VL53L1X_sensors[i].startContinuous(50);
-        Serial.print("VL53L1X sensor ");
-        Serial.print(i);
-        Serial.println(" initialized successfully");
+    // Initialize the TOF sensor array
+    if (!tofSensorArray.begin()) {
+        Serial.println("WARNING: Failed to initialize TOF sensor array");
+    } else {
+        Serial.println("TOF sensor array initialized successfully");
     }
     
     Serial.println("Initialising IMU (BNO055)...");
@@ -294,7 +302,9 @@ void task_init() {
   // taskManager.addTask(tRead_colour);
 //   taskManager.addTask(tRead_imu);          //reading IMU
 //   taskManager.addTask(tProximity_sensor);  //reading proximity sensor
-    // taskManager.addTask(tUltrasonic_sensor);  //reading ultrasonic sensor    
+    // taskManager.addTask(tUltrasonic_sensor);  //reading ultrasonic sensor
+    taskManager.addTask(tColor_sensor);       //reading color sensor
+    taskManager.addTask(tIR_XY_Position);     //reading IR XY position sensor
     taskManager.addTask(tVL53L1X_sensor);     //reading VL53L1X sensors  
     taskManager.addTask(tSensor_average);
   // taskManager.addTask(tSet_motor); 
@@ -314,6 +324,8 @@ void task_init() {
   tRead_imu.enable();
   tProximity_sensor.enable();
   tUltrasonic_sensor.enable();
+  tColor_sensor.enable();
+  tIR_XY_Position.enable();
   tVL53L1X_sensor.enable();
   tSensor_average.enable();
   tSet_motor.enable();
