@@ -44,6 +44,9 @@ public:
     // Print color data to serial
     void printColorData(const ColorData& data);
     
+    // Decode and print color with hex value and color name
+    void decodeColor(const ColorData& data);
+    
     // Check if sensor is initialized
     bool isInitialized() const;
 };

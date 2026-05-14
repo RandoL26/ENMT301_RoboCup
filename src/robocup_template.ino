@@ -18,6 +18,8 @@
 #include <Wire.h>                   //for I2C and SPI
 #include <TaskScheduler.h>          //scheduler
 #include <VL53L1X.h>                //VL53L1X distance sensor
+#include <stdarg.h>                 //for va_list in printf functions
+#include <stdio.h>                  //for vsnprintf
 #include "BNO055_support.h"         //IMU sensor 
 
 // Custom headers
@@ -27,10 +29,12 @@
 #include "return_to_base.h"
 #include "proximity_sensor.h"       //inductive proximity sensor
 #include "ultrasonic_sensor.h"      //ultrasonic distance sensor
+#include "ultrasonic_sensor_array.h" //ultrasonic sensor array (multiple sensors)
 #include "color_sensor.h"           //colour sensor module
 #include "ir_xy_position.h"         //IR XY position sensor
 #include "tof_sensor_array.h"       //TOF (VL53L1X) sensor array
 #include "dc_motor.h"               //DC motor control 
+#include "ch9143_bluetooth.h"       //CH9143 Bluetooth module
 
 //**********************************************************************************
 // Local Definitions
@@ -82,8 +86,10 @@
 // Pin deffinitions
 #define IO_POWER  49
 #define PROXIMITY_SENSOR_PIN  20  // A6Z
-#define ULTRASONIC_TRIGGER_PIN  3   // D2Z
-#define ULTRASONIC_ECHO_PIN  2      // D3Z
+#define ULTRASONIC_TRIGGER_PIN_1  3   // D2Z - Sensor 1 Trigger
+#define ULTRASONIC_ECHO_PIN_1     2   // D3Z - Sensor 1 Echo
+#define ULTRASONIC_TRIGGER_PIN_2  5   // Sensor 2 Trigger (adjust as needed)
+#define ULTRASONIC_ECHO_PIN_2     4   // Sensor 2 Echo (adjust as needed)
 
 
 // VL53L1X sensor configuration
@@ -95,6 +101,9 @@ const uint8_t VL53L1X_XSHUT_PINS[VL53L1X_SENSOR_COUNT] = { 18 };  // Update this
 
 // Serial deffinitions
 #define BAUD_RATE 115200
+#define BLUETOOTH_BAUD 9600
+#define BLUETOOTH_RX_PIN 0  // Serial3 RX (try this)
+#define BLUETOOTH_TX_PIN 1  // Serial3 TX (try this)
 
 Servo right_motor;
 Servo left_motor;
@@ -111,8 +120,11 @@ IMU_Data current_imu_data;
 // Proximity Sensor instance
 ProximitySensor proximitySensor(PROXIMITY_SENSOR_PIN);
 
-// Ultrasonic Sensor instance
-UltrasonicSensor ultrasonicSensor(ULTRASONIC_TRIGGER_PIN, ULTRASONIC_ECHO_PIN);
+// Ultrasonic Sensor instance (kept for backwards compatibility)
+UltrasonicSensor ultrasonicSensor(ULTRASONIC_TRIGGER_PIN_1, ULTRASONIC_ECHO_PIN_1);
+
+// Ultrasonic Sensor Array for 2 sensors
+UltrasonicSensorArray ultrasonicArray(2);
 
 // Color Sensor instance
 ColorSensor colorSensor;
@@ -123,23 +135,38 @@ IRXYPosition irXYSensor;
 // TOF Sensor Array instance
 TOFSensorArray tofSensorArray(VL53L1X_SENSOR_COUNT);
 
+// CH9143 Bluetooth instance
+CH9143Bluetooth bluetooth(&Serial3, BLUETOOTH_RX_PIN, BLUETOOTH_TX_PIN, BLUETOOTH_BAUD);
+
 // Task wrapper for proximity sensor reading
 void proximity_sensor_callback(void) {
     proximitySensor.update();
     proximitySensor.printStatus();
 }
 
-// Task wrapper for ultrasonic sensor reading
+// Task wrapper for ultrasonic sensor reading (array with 2 sensors)
 void ultrasonic_sensor_callback(void) {
-    ultrasonicSensor.update();
-    ultrasonicSensor.printStatus();
+    if (ultrasonicArray.isInitialized()) {
+        UltrasonicSensorArray::UltrasonicData data = ultrasonicArray.readDistances();
+        ultrasonicArray.printDistances(data);
+        // Optional: free the allocated memory after use
+        delete[] data.distances;
+    }
 }
 
 // Task wrapper for color sensor reading
 void color_sensor_callback(void) {
     if (colorSensor.isInitialized()) {
         ColorSensor::ColorData colorData = colorSensor.readColor();
-        colorSensor.printColorData(colorData);
+        colorSensor.decodeColor(colorData);  // Print to USB serial
+        
+        // Also send to Bluetooth
+        if (bluetooth.isInitialized()) {
+            uint8_t r = (colorData.hexColor >> 16) & 0xFF;
+            uint8_t g = (colorData.hexColor >> 8) & 0xFF;
+            uint8_t b = colorData.hexColor & 0xFF;
+            bluetooth.printf("BT Color: #%02X%02X%02X\n", r, g, b);
+        }
     }
 }
 
@@ -163,19 +190,14 @@ void vl53l1x_sensor_callback(void) {
 // Task wrapper for IMU reading
 void imu_task_callback(void) {
     current_imu_data = read_imu();
-    // Print IMU data to serial
-    Serial.print("Raw Gyro X:");
-    Serial.print(current_imu_data.gyro_x);
-    Serial.print(" Y:");
-    Serial.print(current_imu_data.gyro_y);
-    Serial.print(" Z:");
-    Serial.print(current_imu_data.gyro_z);
-    Serial.print(" | Accel: ");
-    Serial.print(current_imu_data.accel_x);
-    Serial.print(", ");
-    Serial.print(current_imu_data.accel_y);
-    Serial.print(", ");
-    Serial.println(current_imu_data.accel_z);
+    // Print IMU data to both Serial and Bluetooth
+    printfBoth("Raw Gyro X:%d Y:%d Z:%d | Accel: %d, %d, %d\n",
+               current_imu_data.gyro_x,
+               current_imu_data.gyro_y,
+               current_imu_data.gyro_z,
+               current_imu_data.accel_x,
+               current_imu_data.accel_y,
+               current_imu_data.accel_z);
 }
 
 // Task wrapper for DC motor control
@@ -233,6 +255,40 @@ void pin_init();
 void robot_init();
 void task_init();
 
+// Helper functions to stream output to both Serial and Bluetooth
+void printBoth(const char* data) {
+    Serial.print(data);
+    if (bluetooth.isInitialized()) {
+        bluetooth.print(data);
+    }
+}
+
+void printlnBoth(const char* data) {
+    Serial.println(data);
+    if (bluetooth.isInitialized()) {
+        bluetooth.println(data);
+    }
+}
+
+void printfBoth(const char* format, ...) {
+    char buffer[256];
+    va_list args;
+    
+    // Print to Serial
+    va_start(args, format);
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+    Serial.print(buffer);
+    
+    // Print to Bluetooth
+    if (bluetooth.isInitialized()) {
+        va_start(args, format);
+        vsnprintf(buffer, sizeof(buffer), format, args);
+        va_end(args);
+        bluetooth.print(buffer);
+    }
+}
+
 //**********************************************************************************
 // put your setup code here, to run once:
 //**********************************************************************************
@@ -240,10 +296,23 @@ void setup() {
   Serial.begin(BAUD_RATE);
   delay(2000);  // Give USB serial time to stabilize
   Serial.println("\n\n=== RoboCup Robot Starting ===");
+  
+  // Test Serial3 directly before initializing Bluetooth class
+  Serial3.begin(BLUETOOTH_BAUD);
+  delay(100);
+  Serial.println("Testing Serial3...");
+  Serial3.println("DIRECT_TEST: Serial3 Working");
+  Serial3.flush();
+  
   Wire.begin();        // MUST be called FIRST - before any I2C operations
   pin_init();
   robot_init();        // robot_init() calls BNO_Init() which needs I2C
   task_init();
+  
+  // Now that Bluetooth is initialized, send startup message
+  if (bluetooth.isInitialized()) {
+    bluetooth.println("Setup Complete");
+  }
 }
 
 //**********************************************************************************
@@ -252,7 +321,7 @@ void setup() {
 //**********************************************************************************
 void pin_init(){
     
-    Serial.println("Pins have been initialised \n"); 
+    printlnBoth("Pins have been initialised \n"); 
 
     pinMode(IO_POWER, OUTPUT);              //Pin 49 is used to enable IO power
     digitalWrite(IO_POWER, 1);              //Enable IO power on main CPU board
@@ -262,19 +331,29 @@ void pin_init(){
 // Set default robot state
 //**********************************************************************************
 void robot_init() {
-    Serial.println("Initialising Proximity Sensor...");
+    printlnBoth("Initialising Proximity Sensor...");
     proximitySensor.begin();
     
-    Serial.println("Initialising Ultrasonic Sensor...");
-    ultrasonicSensor.begin();
+    printlnBoth("Initialising Ultrasonic Sensor Array...");
+    ultrasonicArray.addSensor(0, ULTRASONIC_TRIGGER_PIN_1, ULTRASONIC_ECHO_PIN_1);
+    ultrasonicArray.addSensor(1, ULTRASONIC_TRIGGER_PIN_2, ULTRASONIC_ECHO_PIN_2);
+    ultrasonicArray.begin();
     
-    Serial.println("Initialising Color Sensor...");
+    printlnBoth("Initialising Color Sensor...");
     colorSensor.begin();
     
-    Serial.println("Initialising IR XY Position Sensor...");
+    printlnBoth("Initialising CH9143 Bluetooth...");
+    if (bluetooth.begin()) {
+        Serial.println("✓ Bluetooth module initialized");
+        bluetooth.println("=== Bluetooth Ready ===");
+    } else {
+        Serial.println("✗ Bluetooth initialization failed!");
+    }
+    
+    printlnBoth("Initialising IR XY Position Sensor...");
     irXYSensor.begin();
     
-    Serial.println("Initialising TOF (VL53L1X) Sensor Array...");
+    printlnBoth("Initialising TOF (VL53L1X) Sensor Array...");
     Wire.setClock(400000); // use 400 kHz I2C
     
     // Set XSHUT pins for each sensor
@@ -282,16 +361,16 @@ void robot_init() {
     
     // Initialize the TOF sensor array
     if (!tofSensorArray.begin()) {
-        Serial.println("WARNING: Failed to initialize TOF sensor array");
+        printlnBoth("WARNING: Failed to initialize TOF sensor array");
     } else {
-        Serial.println("TOF sensor array initialized successfully");
+        printlnBoth("TOF sensor array initialized successfully");
     }
     
-    Serial.println("Initialising IMU (BNO055)...");
+    printlnBoth("Initialising IMU (BNO055)...");
     BNO055_RETURN_FUNCTION_TYPE init_result = BNO_Init(&bno055);
     
     if (init_result == SUCCESS) {
-        Serial.println("IMU initialised successfully");
+        printlnBoth("IMU initialised successfully");
         delay(500);
         
         // Set operation mode to NDOF (Nine Degrees of Freedom)
@@ -301,13 +380,12 @@ void robot_init() {
         // Calibrate gyroscope to zero on startup
         calibrate_gyroscope();
         
-        Serial.println("Initialising DC Motor...");
+        printlnBoth("Initialising DC Motor...");
         dcMotor.begin();
         
-        Serial.println("Robot is ready \n");
+        printlnBoth("Robot is ready \n");
     } else {
-        Serial.print("ERROR: Failed to initialise IMU! Error code: ");
-        Serial.println(init_result);
+        printfBoth("ERROR: Failed to initialise IMU! Error code: %d\n", init_result);
     }
 }
 
@@ -325,12 +403,12 @@ void task_init() {
   // taskManager.addTask(tRead_colour);
 //   taskManager.addTask(tRead_imu);          //reading IMU
 //   taskManager.addTask(tProximity_sensor);  //reading proximity sensor
-    // taskManager.addTask(tUltrasonic_sensor);  //reading ultrasonic sensor
-    taskManager.addTask(tColor_sensor);       //reading color sensor
-    taskManager.addTask(tIR_XY_Position);     //reading IR XY position sensor
-    taskManager.addTask(tVL53L1X_sensor);     //reading VL53L1X sensors  
-    taskManager.addTask(tSensor_average);
-    taskManager.addTask(tDC_motor);           //DC motor control
+    taskManager.addTask(tUltrasonic_sensor);  //reading ultrasonic sensor
+    // taskManager.addTask(tColor_sensor);       //reading color sensor
+    // taskManager.addTask(tIR_XY_Position);     //reading IR XY position sensor
+    // taskManager.addTask(tVL53L1X_sensor);     //reading VL53L1X sensors  
+    // taskManager.addTask(tSensor_average);
+    // taskManager.addTask(tDC_motor);           //DC motor control
   // taskManager.addTask(tSet_motor); 
   // taskManager.addTask(tWeight_scan);
   // taskManager.addTask(tCollect_weight);
@@ -362,7 +440,7 @@ void task_init() {
  //tCheck_watchdog.enable();
  //tVictory_dance.enable();
 
- Serial.println("Tasks have been initialised \n");
+ printlnBoth("Tasks have been initialised \n");
 }
 
 
