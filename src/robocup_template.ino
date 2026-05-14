@@ -29,7 +29,8 @@
 #include "ultrasonic_sensor.h"      //ultrasonic distance sensor
 #include "color_sensor.h"           //colour sensor module
 #include "ir_xy_position.h"         //IR XY position sensor
-#include "tof_sensor_array.h"       //TOF (VL53L1X) sensor array 
+#include "tof_sensor_array.h"       //TOF (VL53L1X) sensor array
+#include "dc_motor.h"               //DC motor control 
 
 //**********************************************************************************
 // Local Definitions
@@ -53,6 +54,7 @@
 #define PROXIMITY_SENSOR_READ_PERIOD        40
 #define ULTRASONIC_SENSOR_READ_PERIOD       100
 #define VL53L1X_SENSOR_READ_PERIOD          100
+#define DC_MOTOR_CONTROL_PERIOD             40
 
 
 
@@ -75,6 +77,7 @@
 #define PROXIMITY_SENSOR_NUM_EXECUTE        -1
 #define ULTRASONIC_SENSOR_NUM_EXECUTE       -1
 #define VL53L1X_SENSOR_NUM_EXECUTE          -1
+#define DC_MOTOR_CONTROL_NUM_EXECUTE        -1
 
 // Pin deffinitions
 #define IO_POWER  49
@@ -87,11 +90,17 @@
 const uint8_t VL53L1X_SENSOR_COUNT = 1;  // Update this if you add more sensors
 const uint8_t VL53L1X_XSHUT_PINS[VL53L1X_SENSOR_COUNT] = { 18 };  // Update this with the XSHUT pins for each sensor
 
+// DC Motor PIN definitions
+#define DC_MOTOR_PIN 1              //PWM pin for DC motor control (can be extended to 2 motors)
+
 // Serial deffinitions
 #define BAUD_RATE 115200
 
 Servo right_motor;
 Servo left_motor;
+
+// DC Motor instance (Channel 1)
+DCMotor dcMotor(DC_MOTOR_PIN);
 
 // BNO055 IMU structure
 struct bno055_t bno055;
@@ -150,6 +159,7 @@ void vl53l1x_sensor_callback(void) {
     }
 }
 
+
 // Task wrapper for IMU reading
 void imu_task_callback(void) {
     current_imu_data = read_imu();
@@ -166,6 +176,13 @@ void imu_task_callback(void) {
     Serial.print(current_imu_data.accel_y);
     Serial.print(", ");
     Serial.println(current_imu_data.accel_z);
+}
+
+// Task wrapper for DC motor control
+void dc_motor_callback(void) {
+    // Example: Set motor to 50% forward speed
+    dcMotor.setSpeed(100);  // Uncomment to test
+    dcMotor.printStatus();
 }
 
 
@@ -187,6 +204,9 @@ Task tColor_sensor(COLOUR_READ_TASK_PERIOD, COLOUR_READ_TASK_NUM_EXECUTE, &color
 Task tIR_XY_Position(IR_READ_TASK_PERIOD, IR_READ_TASK_NUM_EXECUTE, &ir_xy_position_callback);
 Task tVL53L1X_sensor(VL53L1X_SENSOR_READ_PERIOD, VL53L1X_SENSOR_NUM_EXECUTE, &vl53l1x_sensor_callback);
 Task tSensor_average(SENSOR_AVERAGE_PERIOD,      SENSOR_AVERAGE_NUM_EXECUTE,      &sensor_average);
+
+// Task for DC motor control
+Task tDC_motor(DC_MOTOR_CONTROL_PERIOD,          DC_MOTOR_CONTROL_NUM_EXECUTE,    &dc_motor_callback);
 
 // Task to set the motor speeds and direction
 Task tSet_motor(SET_MOTOR_TASK_PERIOD,           SET_MOTOR_TASK_NUM_EXECUTE,      &set_motor);
@@ -281,6 +301,9 @@ void robot_init() {
         // Calibrate gyroscope to zero on startup
         calibrate_gyroscope();
         
+        Serial.println("Initialising DC Motor...");
+        dcMotor.begin();
+        
         Serial.println("Robot is ready \n");
     } else {
         Serial.print("ERROR: Failed to initialise IMU! Error code: ");
@@ -307,6 +330,7 @@ void task_init() {
     taskManager.addTask(tIR_XY_Position);     //reading IR XY position sensor
     taskManager.addTask(tVL53L1X_sensor);     //reading VL53L1X sensors  
     taskManager.addTask(tSensor_average);
+    taskManager.addTask(tDC_motor);           //DC motor control
   // taskManager.addTask(tSet_motor); 
   // taskManager.addTask(tWeight_scan);
   // taskManager.addTask(tCollect_weight);
@@ -328,6 +352,7 @@ void task_init() {
   tIR_XY_Position.enable();
   tVL53L1X_sensor.enable();
   tSensor_average.enable();
+  tDC_motor.enable();
   tSet_motor.enable();
   tWeight_scan.enable();
   tCollect_weight.enable();

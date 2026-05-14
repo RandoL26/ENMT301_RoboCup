@@ -12,9 +12,9 @@
             "type": "platformio-debug",
             "request": "launch",
             "name": "PIO Debug",
-            "executable": "/Users/max/Desktop/ENMT301_RoboCup/.pio/build/teensy40/firmware.elf",
+            "executable": "C:/Temp/jbu135/ENMT301_RoboCup/.pio/build/teensy40/firmware.elf",
             "projectEnvName": "teensy40",
-            "toolchainBinDir": "/Users/max/.platformio/packages/toolchain-gccarmnoneeabi-teensy/bin",
+            "toolchainBinDir": "C:/Users/jbu135/.platformio/packages/toolchain-gccarmnoneeabi-teensy/bin",
             "internalConsoleOptions": "openOnSessionStart",
             "preLaunchTask": {
                 "type": "PlatformIO",
@@ -25,18 +25,18 @@
             "type": "platformio-debug",
             "request": "launch",
             "name": "PIO Debug (skip Pre-Debug)",
-            "executable": "/Users/max/Desktop/ENMT301_RoboCup/.pio/build/teensy40/firmware.elf",
+            "executable": "C:/Temp/jbu135/ENMT301_RoboCup/.pio/build/teensy40/firmware.elf",
             "projectEnvName": "teensy40",
-            "toolchainBinDir": "/Users/max/.platformio/packages/toolchain-gccarmnoneeabi-teensy/bin",
+            "toolchainBinDir": "C:/Users/jbu135/.platformio/packages/toolchain-gccarmnoneeabi-teensy/bin",
             "internalConsoleOptions": "openOnSessionStart"
         },
         {
             "type": "platformio-debug",
             "request": "launch",
             "name": "PIO Debug (without uploading)",
-            "executable": "/Users/max/Desktop/ENMT301_RoboCup/.pio/build/teensy40/firmware.elf",
+            "executable": "C:/Temp/jbu135/ENMT301_RoboCup/.pio/build/teensy40/firmware.elf",
             "projectEnvName": "teensy40",
-            "toolchainBinDir": "/Users/max/.platformio/packages/toolchain-gccarmnoneeabi-teensy/bin",
+            "toolchainBinDir": "C:/Users/jbu135/.platformio/packages/toolchain-gccarmnoneeabi-teensy/bin",
             "internalConsoleOptions": "openOnSessionStart",
             "loadMode": "manual"
         }
