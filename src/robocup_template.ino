@@ -32,6 +32,7 @@
 #include "ultrasonic_sensor_array.h" //ultrasonic sensor array (multiple sensors)
 #include "color_sensor.h"           //colour sensor module
 #include "ir_xy_position.h"         //IR XY position sensor
+#include "ir_distance_sensor.h"     //2Y0A02 IR distance sensor
 #include "tof_sensor_array.h"       //TOF (VL53L1X) sensor array
 #include "dc_motor.h"               //DC motor control 
 #include "ch9143_bluetooth.h"       //CH9143 Bluetooth module
@@ -58,6 +59,7 @@
 #define PROXIMITY_SENSOR_READ_PERIOD        40
 #define ULTRASONIC_SENSOR_READ_PERIOD       100
 #define VL53L1X_SENSOR_READ_PERIOD          100
+#define IR_DISTANCE_SENSOR_READ_PERIOD      50
 #define DC_MOTOR_CONTROL_PERIOD             40
 
 
@@ -81,6 +83,7 @@
 #define PROXIMITY_SENSOR_NUM_EXECUTE        -1
 #define ULTRASONIC_SENSOR_NUM_EXECUTE       -1
 #define VL53L1X_SENSOR_NUM_EXECUTE          -1
+#define IR_DISTANCE_SENSOR_NUM_EXECUTE      -1
 #define DC_MOTOR_CONTROL_NUM_EXECUTE        -1
 
 // Pin deffinitions
@@ -90,6 +93,7 @@
 #define ULTRASONIC_ECHO_PIN_1     2   // D3Z - Sensor 1 Echo
 #define ULTRASONIC_TRIGGER_PIN_2  5   // Sensor 2 Trigger (adjust as needed)
 #define ULTRASONIC_ECHO_PIN_2     4   // Sensor 2 Echo (adjust as needed)
+#define IR_DISTANCE_SENSOR_PIN    A9  // Analog pin for 2Y0A02 IR distance sensor
 
 
 // VL53L1X sensor configuration
@@ -131,6 +135,9 @@ ColorSensor colorSensor;
 
 // IR XY Position Sensor instance
 IRXYPosition irXYSensor;
+
+// IR Distance Sensor instance (2Y0A02)
+IRDistanceSensor irDistanceSensor(IR_DISTANCE_SENSOR_PIN);
 
 // TOF Sensor Array instance
 TOFSensorArray tofSensorArray(VL53L1X_SENSOR_COUNT);
@@ -186,6 +193,13 @@ void vl53l1x_sensor_callback(void) {
     }
 }
 
+// Task wrapper for IR distance sensor reading
+void ir_distance_sensor_callback(void) {
+    if (irDistanceSensor.isInitialized()) {
+        irDistanceSensor.readDistance();
+        irDistanceSensor.printDistance();
+    }
+}
 
 // Task wrapper for IMU reading
 void imu_task_callback(void) {
@@ -225,6 +239,7 @@ Task tUltrasonic_sensor(ULTRASONIC_SENSOR_READ_PERIOD, ULTRASONIC_SENSOR_NUM_EXE
 Task tColor_sensor(COLOUR_READ_TASK_PERIOD, COLOUR_READ_TASK_NUM_EXECUTE, &color_sensor_callback);
 Task tIR_XY_Position(IR_READ_TASK_PERIOD, IR_READ_TASK_NUM_EXECUTE, &ir_xy_position_callback);
 Task tVL53L1X_sensor(VL53L1X_SENSOR_READ_PERIOD, VL53L1X_SENSOR_NUM_EXECUTE, &vl53l1x_sensor_callback);
+Task tIR_Distance_sensor(IR_DISTANCE_SENSOR_READ_PERIOD, IR_DISTANCE_SENSOR_NUM_EXECUTE, &ir_distance_sensor_callback);
 Task tSensor_average(SENSOR_AVERAGE_PERIOD,      SENSOR_AVERAGE_NUM_EXECUTE,      &sensor_average);
 
 // Task for DC motor control
@@ -353,6 +368,9 @@ void robot_init() {
     printlnBoth("Initialising IR XY Position Sensor...");
     irXYSensor.begin();
     
+    printlnBoth("Initialising IR Distance Sensor (2Y0A02)...");
+    irDistanceSensor.begin();
+    
     printlnBoth("Initialising TOF (VL53L1X) Sensor Array...");
     Wire.setClock(400000); // use 400 kHz I2C
     
@@ -403,10 +421,11 @@ void task_init() {
   // taskManager.addTask(tRead_colour);
 //   taskManager.addTask(tRead_imu);          //reading IMU
 //   taskManager.addTask(tProximity_sensor);  //reading proximity sensor
-    taskManager.addTask(tUltrasonic_sensor);  //reading ultrasonic sensor
+    // taskManager.addTask(tUltrasonic_sensor);  //reading ultrasonic sensor
     // taskManager.addTask(tColor_sensor);       //reading color sensor
     // taskManager.addTask(tIR_XY_Position);     //reading IR XY position sensor
-    // taskManager.addTask(tVL53L1X_sensor);     //reading VL53L1X sensors  
+    // taskManager.addTask(tVL53L1X_sensor);     //reading VL53L1X sensors
+    taskManager.addTask(tIR_Distance_sensor); //reading IR distance sensor (2Y0A02)  
     // taskManager.addTask(tSensor_average);
     // taskManager.addTask(tDC_motor);           //DC motor control
   // taskManager.addTask(tSet_motor); 
@@ -429,6 +448,7 @@ void task_init() {
   tColor_sensor.enable();
   tIR_XY_Position.enable();
   tVL53L1X_sensor.enable();
+  tIR_Distance_sensor.enable();
   tSensor_average.enable();
   tDC_motor.enable();
   tSet_motor.enable();

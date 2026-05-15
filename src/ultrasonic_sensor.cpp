@@ -49,11 +49,7 @@ void UltrasonicSensor::update() {
         // Calculate distance: distance = (duration * 0.0343) / 2
         if (duration > 0) {
             lastDistance = (duration * 0.0343) / 2.0;
-            Serial.print("DEBUG: Calculated distance = ");
-            Serial.print(lastDistance);
-            Serial.println(" cm");
         } else {
-            Serial.println("DEBUG: No echo received (timeout)");
             lastDistance = 0;
         }
     
