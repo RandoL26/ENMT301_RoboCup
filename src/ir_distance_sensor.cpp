@@ -2,7 +2,7 @@
 
 // Constructor
 IRDistanceSensor::IRDistanceSensor(uint8_t pin)
-    : analogPin(pin), lastDistance(0), initialized(false), calibrationConstant(8361.0) {
+    : analogPin(pin), lastDistance(0), initialized(false), calibrationConstant(15000) {
 }
 
 // Initialize the IR distance sensor
