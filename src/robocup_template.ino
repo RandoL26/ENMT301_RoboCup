@@ -101,7 +101,9 @@ const uint8_t VL53L1X_SENSOR_COUNT = 1;  // Update this if you add more sensors
 const uint8_t VL53L1X_XSHUT_PINS[VL53L1X_SENSOR_COUNT] = { 18 };  // Update this with the XSHUT pins for each sensor
 
 // DC Motor PIN definitions
-#define DC_MOTOR_PIN 1              //PWM pin for DC motor control (can be extended to 2 motors)
+#define DC_M1_PIN 0              //PWM pin for DC motor control (can be extended to 2 motors)
+#define DC_M2_PIN 1              //PWM pin for DC motor control (can be extended to 2 motors)
+#define MOTOR_SPEED 80           // Example motor speed (set to desired value)
 
 // Serial deffinitions
 #define BAUD_RATE 115200
@@ -113,7 +115,8 @@ Servo right_motor;
 Servo left_motor;
 
 // DC Motor instance (Channel 1)
-DCMotor dcMotor(DC_MOTOR_PIN);
+DCMotor dcMotor(DC_M1_PIN);
+DCMotor dcMotor2(DC_M2_PIN);  // Uncomment if using a second motor
 
 // BNO055 IMU structure
 struct bno055_t bno055;
@@ -217,8 +220,10 @@ void imu_task_callback(void) {
 // Task wrapper for DC motor control
 void dc_motor_callback(void) {
     // Example: Set motor to 50% forward speed
-    dcMotor.setSpeed(100);  // Uncomment to test
+    dcMotor.setSpeed(-(MOTOR_SPEED));  // Uncomment to test
     dcMotor.printStatus();
+    dcMotor2.setSpeed(MOTOR_SPEED); // Uncomment if using a second motor
+    dcMotor2.printStatus(); // Uncomment if using a second motor
 }
 
 
@@ -400,6 +405,7 @@ void robot_init() {
         
         printlnBoth("Initialising DC Motor...");
         dcMotor.begin();
+        dcMotor2.begin();  // Uncomment if using a second motor
         
         printlnBoth("Robot is ready \n");
     } else {
@@ -427,7 +433,7 @@ void task_init() {
     // taskManager.addTask(tVL53L1X_sensor);     //reading VL53L1X sensors
     taskManager.addTask(tIR_Distance_sensor); //reading IR distance sensor (2Y0A02)  
     // taskManager.addTask(tSensor_average);
-    // taskManager.addTask(tDC_motor);          + //DC motor control
+    taskManager.addTask(tDC_motor);          + //DC motor control
   // taskManager.addTask(tSet_motor); 
   // taskManager.addTask(tWeight_scan);
   // taskManager.addTask(tCollect_weight);
