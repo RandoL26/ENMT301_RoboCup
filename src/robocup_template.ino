@@ -13,7 +13,7 @@
  ******************************************************************************/
 
 #include <Servo.h>                  //control the DC motors
-//#include <Herkulex.h>             //smart servo
+#include "Herkulex.h"             //smart servo (uses hardware Serial: pins 0 (RX), 1 (TX))
 #include <Adafruit_TCS34725.h>      //colour sensor
 #include <Wire.h>                   //for I2C and SPI
 #include <TaskScheduler.h>          //scheduler
@@ -63,6 +63,8 @@
 #define IR_DISTANCE_SENSOR_READ_PERIOD      50
 #define DC_MOTOR_CONTROL_PERIOD             40
 
+#define HERKULEX_TEST_PERIOD               1200
+
 
 
 
@@ -105,6 +107,16 @@ const uint8_t VL53L1X_XSHUT_PINS[VL53L1X_SENSOR_COUNT] = { 18 };  // Update this
 #define DC_M1_PIN 0              //PWM pin for DC motor control (can be extended to 2 motors)
 #define DC_M2_PIN 1              //PWM pin for DC motor control (can be extended to 2 motors)
 #define MOTOR_SPEED 80           // Example motor speed (set to desired value)
+
+//electromagnet PIN definition
+#define MAGNET_PIN 26
+
+// Herkulex smart servo ID (broadcast ID 0xfe)
+#define HERKULEX_ID 1
+
+// Herkulex serial pins when using SoftwareSerial (rx, tx)
+#define HERKULEX_RX_PIN 0
+#define HERKULEX_TX_PIN 1
 
 // Serial deffinitions
 #define BAUD_RATE 115200
@@ -300,6 +312,17 @@ void handle_bluetooth_line(const char* line) {
     bluetooth.println("ERR Unknown command");
 }
 
+// Herkulex continuous test callback: toggles between -100 and 100 degrees
+void herkulex_test_callback() {
+    static bool toggle = false;
+    int angle = toggle ? 100 : -100;
+    int led = toggle ? LED_GREEN : LED_BLUE;
+    Herkulex.torqueON(HERKULEX_ID);
+    Herkulex.moveOneAngle(HERKULEX_ID, angle, 1000, led);
+    Herkulex.moveOneAngle(HERKULEX_ID, -100, 1000, LED_BLUE);
+    printfBoth("Herkulex test move to %d\n", Herkulex.getPosition(HERKULEX_ID));
+    toggle = !toggle;
+}
 
 //**********************************************************************************
 // Task Scheduler and Tasks
@@ -320,6 +343,7 @@ Task tIR_XY_Position(IR_READ_TASK_PERIOD, IR_READ_TASK_NUM_EXECUTE, &ir_xy_posit
 Task tVL53L1X_sensor(VL53L1X_SENSOR_READ_PERIOD, VL53L1X_SENSOR_NUM_EXECUTE, &vl53l1x_sensor_callback);
 Task tIR_Distance_sensor(IR_DISTANCE_SENSOR_READ_PERIOD, IR_DISTANCE_SENSOR_NUM_EXECUTE, &ir_distance_sensor_callback);
 Task tSensor_average(SENSOR_AVERAGE_PERIOD,      SENSOR_AVERAGE_NUM_EXECUTE,      &sensor_average);
+Task tHerkulexTest(HERKULEX_TEST_PERIOD, -1, &herkulex_test_callback);
 
 // Task for DC motor control
 Task tDC_motor(DC_MOTOR_CONTROL_PERIOD,          DC_MOTOR_CONTROL_NUM_EXECUTE,    &dc_motor_callback);
@@ -348,6 +372,7 @@ Scheduler taskManager;
 void pin_init();
 void robot_init();
 void task_init();
+
 
 // Helper functions to stream output to both Serial and Bluetooth
 void printBoth(const char* data) {
@@ -419,6 +444,14 @@ void pin_init(){
 
     pinMode(IO_POWER, OUTPUT);              //Pin 49 is used to enable IO power
     digitalWrite(IO_POWER, 1);              //Enable IO power on main CPU board
+    // Initialise electromagnet pin (analog connector used as digital output)
+    pinMode(MAGNET_PIN, OUTPUT);
+    digitalWrite(MAGNET_PIN, LOW); // ensure off by default
+    printlnBoth("Electromagnet pin initialised\n");
+
+    // Pulse electromagnet HIGH for 100 ms for initial test
+    printlnBoth("Pulsing electromagnet HIGH for 100 ms\n");
+    digitalWrite(MAGNET_PIN, HIGH);
 }
 
 //**********************************************************************************
@@ -443,6 +476,37 @@ void robot_init() {
     } else {
         Serial.println("✗ Bluetooth initialization failed!");
     }
+
+    // Initialise Herkulex smart servo using a hardware UART (avoids SoftwareSerial)
+    // On Teensy/Mega use Serial1 (pins 0/1 on many boards)
+    printlnBoth("Initialising Herkulex Smart Servo on Serial1...");
+    Herkulex.begin(115200, HERKULEX_RX_PIN, HERKULEX_TX_PIN);
+    delay(100);
+    Herkulex.reboot(HERKULEX_ID);
+    delay(500);
+    Herkulex.clearError(HERKULEX_ID);
+    Herkulex.ACK(1);  // Set ACK mode to 1 (ACK on error only)
+    Herkulex.set_ID(HERKULEX_ID, HERKULEX_ID);  // Ensure servo ID is set correctly
+    Herkulex.torqueON(HERKULEX_ID);
+    Herkulex.initialize();
+
+    delay(200);
+    printlnBoth("Herkulex Smart Servo initialized\n");
+    // Diagnostics: read status, model and position
+    int hk_stat = Herkulex.stat(HERKULEX_ID);
+    int hk_model = Herkulex.model();
+    int hk_pos = Herkulex.getPosition(HERKULEX_ID);
+    printfBoth("Herkulex stat: %d | model: %d | position: %d\n", hk_stat, hk_model, hk_pos);
+
+    // If status OK (0) then perform startup test move
+    
+    printlnBoth("Herkulex startup test move: moving to -100 then 100\n");
+    Herkulex.moveOneAngle(HERKULEX_ID, -100, 1000, LED_BLUE);
+    delay(1200);
+    Herkulex.moveOneAngle(HERKULEX_ID, 100, 1000, LED_GREEN);
+    delay(1200);
+    printlnBoth("Herkulex test move complete\n");
+    
     
     printlnBoth("Initialising IR XY Position Sensor...");
     irXYSensor.begin();
@@ -505,7 +569,7 @@ void task_init() {
     // taskManager.addTask(tColor_sensor);       //reading color sensor
     // taskManager.addTask(tIR_XY_Position);     //reading IR XY position sensor
     // taskManager.addTask(tVL53L1X_sensor);     //reading VL53L1X sensors
-    taskManager.addTask(tIR_Distance_sensor); //reading IR distance sensor (2Y0A02)  
+    //taskManager.addTask(tIR_Distance_sensor); //reading IR distance sensor (2Y0A02)  
     // taskManager.addTask(tSensor_average);
     taskManager.addTask(tDC_motor);          //DC motor control
   // taskManager.addTask(tSet_motor); 
@@ -518,7 +582,9 @@ void task_init() {
   //taskManager.addTask(tCheck_watchdog);
   //taskManager.addTask(tVictory_dance);      
 
-  //enable the tasks
+    taskManager.addTask(tHerkulexTest);
+
+    //enable the tasks
   tRead_ultrasonic.enable();
   tRead_infrared.enable();
   tRead_colour.enable();
@@ -539,6 +605,7 @@ void task_init() {
   tUnload_weights.enable();
  //tCheck_watchdog.enable();
  //tVictory_dance.enable();
+   tHerkulexTest.enable();
 
  printlnBoth("Tasks have been initialised \n");
 }
@@ -555,3 +622,4 @@ void loop() {
   taskManager.execute();    //execute the scheduler
   //Serial.println("Another scheduler execution cycle has oocured \n");
 }
+
