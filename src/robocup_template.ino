@@ -20,6 +20,7 @@
 #include <VL53L1X.h>                //VL53L1X distance sensor
 #include <stdarg.h>                 //for va_list in printf functions
 #include <stdio.h>                  //for vsnprintf
+#include <string.h>                 //for strcmp/sscanf parsing
 #include "BNO055_support.h"         //IMU sensor 
 
 // Custom headers
@@ -148,6 +149,15 @@ TOFSensorArray tofSensorArray(VL53L1X_SENSOR_COUNT);
 // CH9143 Bluetooth instance
 CH9143Bluetooth bluetooth(&Serial3, BLUETOOTH_RX_PIN, BLUETOOTH_TX_PIN, BLUETOOTH_BAUD);
 
+// Bluetooth motor command state (received from PC/Xbox bridge)
+int16_t bt_left_motor_cmd = 0;
+int16_t bt_right_motor_cmd = 0;
+unsigned long bt_last_cmd_ms = 0;
+
+// Forward declarations for Bluetooth command handling
+void process_bluetooth_motor_commands(void);
+void handle_bluetooth_line(const char* line);
+
 // Task wrapper for proximity sensor reading
 void proximity_sensor_callback(void) {
     proximitySensor.update();
@@ -219,11 +229,75 @@ void imu_task_callback(void) {
 
 // Task wrapper for DC motor control
 void dc_motor_callback(void) {
-    // Example: Set motor to 50% forward speed
-    dcMotor.setSpeed(-(MOTOR_SPEED));  // Uncomment to test
-    dcMotor.printStatus();
-    dcMotor2.setSpeed(MOTOR_SPEED); // Uncomment if using a second motor
-    dcMotor2.printStatus(); // Uncomment if using a second motor
+    // Failsafe: stop if command stream is stale
+    if ((millis() - bt_last_cmd_ms) > 500) {
+        bt_left_motor_cmd = 0;
+        bt_right_motor_cmd = 0;
+    }
+
+    // Apply latest commanded speeds for left/right tracks
+    dcMotor.setSpeed(bt_left_motor_cmd);
+    dcMotor2.setSpeed(bt_right_motor_cmd);
+}
+
+// Read and parse newline-terminated commands from Bluetooth link
+void process_bluetooth_motor_commands(void) {
+    static char lineBuffer[64];
+    static uint8_t idx = 0;
+
+    while (bluetooth.available()) {
+        char c = bluetooth.read();
+
+        if (c == '\r') {
+            continue;
+        }
+
+        if (c == '\n') {
+            lineBuffer[idx] = '\0';
+            if (idx > 0) {
+                handle_bluetooth_line(lineBuffer);
+            }
+            idx = 0;
+            continue;
+        }
+
+        if (idx < (sizeof(lineBuffer) - 1)) {
+            lineBuffer[idx++] = c;
+        } else {
+            // Overflow protection: discard current line
+            idx = 0;
+        }
+    }
+}
+
+// Supported commands:
+//   MOTOR <left> <right>   where left/right are in [-100, 100]
+//   STOP
+void handle_bluetooth_line(const char* line) {
+    int left = 0;
+    int right = 0;
+
+    if (sscanf(line, "MOTOR %d %d", &left, &right) == 2) {
+        left = constrain(left, -100, 100);
+        right = constrain(right, -100, 100);
+
+        bt_left_motor_cmd = (int16_t)left;
+        bt_right_motor_cmd = (int16_t)right;
+        bt_last_cmd_ms = millis();
+
+        bluetooth.printf("ACK MOTOR %d %d\n", bt_left_motor_cmd, bt_right_motor_cmd);
+        return;
+    }
+
+    if (strcmp(line, "STOP") == 0) {
+        bt_left_motor_cmd = 0;
+        bt_right_motor_cmd = 0;
+        bt_last_cmd_ms = millis();
+        bluetooth.println("ACK STOP");
+        return;
+    }
+
+    bluetooth.println("ERR Unknown command");
 }
 
 
@@ -433,7 +507,7 @@ void task_init() {
     // taskManager.addTask(tVL53L1X_sensor);     //reading VL53L1X sensors
     taskManager.addTask(tIR_Distance_sensor); //reading IR distance sensor (2Y0A02)  
     // taskManager.addTask(tSensor_average);
-    taskManager.addTask(tDC_motor);          + //DC motor control
+    taskManager.addTask(tDC_motor);          //DC motor control
   // taskManager.addTask(tSet_motor); 
   // taskManager.addTask(tWeight_scan);
   // taskManager.addTask(tCollect_weight);
@@ -475,6 +549,8 @@ void task_init() {
 // put your main code here, to run repeatedly
 //**********************************************************************************
 void loop() {
+    // Consume inbound Bluetooth control commands continuously
+    process_bluetooth_motor_commands();
   
   taskManager.execute();    //execute the scheduler
   //Serial.println("Another scheduler execution cycle has oocured \n");
