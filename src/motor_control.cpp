@@ -84,8 +84,9 @@ void motorControlProcessSerialCommand(Stream& serial) {
     serial.println("Unknown command. Use: PID SHOW | PID KP <v> | PID KI <v> | PID KD <v> | PID IMAX <v> | PID MINSPD <0-100> | PID LOOPMS <1-1000>");
 }
 
-MotorControl::MotorControl(uint8_t leftMotorPin, uint8_t rightMotorPin)
-    : leftMotor(leftMotorPin), rightMotor(rightMotorPin) {
+MotorControl::MotorControl(int leftMotorPin, int rightMotorPin)
+                : leftMotor(leftMotorPin),
+                    rightMotor(rightMotorPin) {
 }
 
 float MotorControl::normalizeAngle360(float angleDeg) {
@@ -130,13 +131,13 @@ void MotorControl::setSpeeds(int16_t leftSpeed, int16_t rightSpeed) {
 }
 
 void MotorControl::turnLeft(void) {
-    leftMotor.setSpeed(-100);
+    leftMotor.setSpeed(0);
     rightMotor.setSpeed(100);
 }
 
 void MotorControl::turnRight(void) {
     leftMotor.setSpeed(100);
-    rightMotor.setSpeed(-100);
+    rightMotor.setSpeed(0);
 }
 
 bool MotorControl::turnToAngle(float targetAngleDeg,
@@ -206,12 +207,11 @@ bool MotorControl::turnToAngle(float targetAngleDeg,
             command = (int16_t)constrain((int)command, 0, (int)maxSpeed);
         }
 
-        // BNO055 heading increases clockwise.
-        // Positive error => shortest turn is clockwise (right turn).
+        // No direction pin available: use differential forward-only steering.
         if (error > 0.0f) {
-            setSpeeds(command, -command);
+            setSpeeds(command, 0);
         } else {
-            setSpeeds(-command, command);
+            setSpeeds(0, command);
         }
 
         prevError = error;

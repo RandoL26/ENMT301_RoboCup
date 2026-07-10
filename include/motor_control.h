@@ -30,7 +30,7 @@ private:
     static float shortestAngleError(float targetDeg, float currentDeg);
 
 public:
-    MotorControl(uint8_t leftMotorPin, uint8_t rightMotorPin);
+    MotorControl(int leftMotorPin, int rightMotorPin);
 
     void begin(void);
     void setLeft(int16_t speed);
