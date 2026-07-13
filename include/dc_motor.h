@@ -1,55 +1,44 @@
 //************************************
 //         dc_motor.h    
 //************************************
-// DC Motor control for a servo-pulse input motor controller
-// Encoders are read from separate digital input pins
+// DC Motor control for Reversible High torque Turbo worm Geared motor (JGY370 DC 12V)
+// Uses Servo library for PWM pulse control (1ms to 2ms)
+// Two channels available for future expansion
 
 #ifndef DC_MOTOR_H_
 #define DC_MOTOR_H_
 
-#include <Arduino.h>
 #include <Servo.h>
 
 class DCMotor {
 private:
     Servo servo;
-    int pwm_pin;
-    int encoder_pin;
-    long encoder_count;
-    bool encoder_enabled;
-    int last_encoder_state;
-    int current_speed;  // Range: -100 to 100
-    static const int MIN_SPEED = -100;
-    static const int MAX_SPEED = 100;
+    uint8_t pin;
+    int16_t current_speed;  // Range: -100 to 100
+    static const int16_t MIN_SPEED = -100;
+    static const int16_t MAX_SPEED = 100;
+    static const uint16_t NEUTRAL_PULSE = 1500;  // 1.5ms = stop/neutral
+    static const uint16_t MIN_PULSE = 1000;      // 1ms = full reverse
+    static const uint16_t MAX_PULSE = 2000;      // 2ms = full forward
     
 public:
-    DCMotor(int pwmPin, int encoderPin = -1);
+    DCMotor(uint8_t motor_pin);
     
     // Initialize motor on the specified pin
     void begin(void);
     
     // Set motor speed (-100 to 100)
-    // -100 = full reverse, 0 = stop, 100 = full forward
-    void setSpeed(int speed);
-
-    // Poll encoder input and accumulate edge count.
-    // Call this periodically from a scheduler/task loop.
-    void updateEncoder(void);
-
-    // Encoder utilities
-    bool hasEncoder(void) const;
-    int getEncoderPin(void) const;
-    long getEncoderCount(void) const;
-    void resetEncoderCount(void);
+    // Negative values = reverse, 0 = stop, Positive values = forward
+    void setSpeed(int16_t speed);
     
     // Get current motor speed
-    int getSpeed(void) const;
+    int16_t getSpeed(void) const;
     
     // Stop motor (speed = 0)
     void stop(void);
     
     // Check if speed value is within valid range
-    bool isValidSpeed(int speed) const;
+    bool isValidSpeed(int16_t speed) const;
     
     // Print motor status to serial
     void printStatus(void) const;

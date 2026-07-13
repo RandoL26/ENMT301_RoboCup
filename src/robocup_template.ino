@@ -21,7 +21,6 @@
 #include <stdarg.h>                 //for va_list in printf functions
 #include <stdio.h>                  //for vsnprintf
 #include <string.h>                 //for strcmp/sscanf parsing
-#include <ctype.h>                  //for toupper/isspace parsing helpers
 #include "BNO055_support.h"         //IMU sensor 
 
 // Custom headers
@@ -93,10 +92,10 @@
 // Pin deffinitions
 #define IO_POWER  49
 #define PROXIMITY_SENSOR_PIN  20  // A6Z
-#define ULTRASONIC_TRIGGER_PIN_1  10  // Sensor 1 Trigger
-#define ULTRASONIC_ECHO_PIN_1     11  // Sensor 1 Echo
-#define ULTRASONIC_TRIGGER_PIN_2  12  // Sensor 2 Trigger
-#define ULTRASONIC_ECHO_PIN_2     13  // Sensor 2 Echo
+#define ULTRASONIC_TRIGGER_PIN_1  3   // D2Z - Sensor 1 Trigger
+#define ULTRASONIC_ECHO_PIN_1     2   // D3Z - Sensor 1 Echo
+#define ULTRASONIC_TRIGGER_PIN_2  5   // Sensor 2 Trigger (adjust as needed)
+#define ULTRASONIC_ECHO_PIN_2     4   // Sensor 2 Echo (adjust as needed)
 #define IR_DISTANCE_SENSOR_PIN    A9  // Analog pin for 2Y0A02 IR distance sensor
 
 
@@ -104,13 +103,9 @@
 const uint8_t VL53L1X_SENSOR_COUNT = 1;  // Update this if you add more sensors
 const uint8_t VL53L1X_XSHUT_PINS[VL53L1X_SENSOR_COUNT] = { 18 };  // Update this with the XSHUT pins for each sensor
 
-// DC Motor + Encoder pin definitions
-// Motors use servo-pulse control on D2/D3
-// Encoders use D4/D5 as digital inputs
-#define DC_M1_PWM_PIN 2          // Left motor signal pin
-#define DC_M1_ENCODER_PIN 3      // Left motor encoder input pin
-#define DC_M2_PWM_PIN 4          // Right motor signal pin
-#define DC_M2_ENCODER_PIN 5      // Right motor encoder input pin
+// DC Motor PIN definitions
+#define DC_M1_PIN 0              //PWM pin for DC motor control (can be extended to 2 motors)
+#define DC_M2_PIN 1              //PWM pin for DC motor control (can be extended to 2 motors)
 #define MOTOR_SPEED 80           // Example motor speed (set to desired value)
 
 //electromagnet PIN definition
@@ -133,8 +128,8 @@ Servo right_motor;
 Servo left_motor;
 
 // DC Motor instance (Channel 1)
-DCMotor dcMotor(DC_M1_PWM_PIN, DC_M1_ENCODER_PIN);
-DCMotor dcMotor2(DC_M2_PWM_PIN, DC_M2_ENCODER_PIN);  // Uncomment if using a second motor
+DCMotor dcMotor(DC_M1_PIN);
+DCMotor dcMotor2(DC_M2_PIN);  // Uncomment if using a second motor
 
 // BNO055 IMU structure
 struct bno055_t bno055;
@@ -180,8 +175,6 @@ bool    motor_dither_toggle = false;  // alternates each callback tick
 void process_bluetooth_motor_commands(void);
 void process_usb_motor_commands(void);
 void handle_motor_line(const char* line, Print* ackPort);
-void apply_motor_outputs(void);
-void startup_motor_test(void);
 
 // Task wrapper for proximity sensor reading
 void proximity_sensor_callback(void) {
@@ -254,14 +247,6 @@ void imu_task_callback(void) {
 
 // Task wrapper for DC motor control
 void dc_motor_callback(void) {
-    apply_motor_outputs();
-}
-
-void apply_motor_outputs(void) {
-    // Poll encoder edges for both motors
-    dcMotor.updateEncoder();
-    dcMotor2.updateEncoder();
-
     // Dither: alternate between lo and hi trim each tick to simulate a mid value
     motor_dither_toggle = !motor_dither_toggle;
     int16_t ltrim = motor_dither_toggle ? motor_trim_left_lo  : motor_trim_left_hi;
@@ -273,27 +258,6 @@ void apply_motor_outputs(void) {
     // Latch behavior: hold last commanded speeds until changed
     dcMotor.setSpeed(left_out);
     dcMotor2.setSpeed(right_out);
-}
-
-void startup_motor_test(void) {
-    printlnBoth("Startup motor test: full forward...");
-    dcMotor.setSpeed(100);
-    dcMotor2.setSpeed(100);
-    delay(1500);
-
-    dcMotor.stop();
-    dcMotor2.stop();
-    delay(500);
-
-    printlnBoth("Startup motor test: full reverse...");
-    dcMotor.setSpeed(-100);
-    dcMotor2.setSpeed(-100);
-    delay(1500);
-
-    printlnBoth("Startup motor test: stop...");
-    dcMotor.stop();
-    dcMotor2.stop();
-    delay(600);
 }
 
 // Read and parse newline-terminated commands from Bluetooth link
@@ -361,40 +325,11 @@ void process_usb_motor_commands(void) {
 //   TRIM <l_lo> <l_hi> <r_lo> <r_hi>  dither between lo/hi each tick (all in [50,150])
 //                                  set lo==hi for a fixed trim (e.g. TRIM 100 100 100 100)
 //   STOP
-//   ENCODER                        print current encoder edge counts
-//   ENCODER RESET                  reset both encoder edge counters
 void handle_motor_line(const char* line, Print* ackPort) {
-    // Make command parsing robust to whitespace and letter-case.
-    char cmd[64];
-    size_t len = strlen(line);
-    if (len >= sizeof(cmd)) {
-        len = sizeof(cmd) - 1;
-    }
-    memcpy(cmd, line, len);
-    cmd[len] = '\0';
-
-    // Trim leading whitespace
-    char* p = cmd;
-    while (*p && isspace((unsigned char)*p)) {
-        p++;
-    }
-
-    // Trim trailing whitespace
-    char* endp = p + strlen(p);
-    while (endp > p && isspace((unsigned char)*(endp - 1))) {
-        endp--;
-    }
-    *endp = '\0';
-
-    // Uppercase for case-insensitive command handling
-    for (char* c = p; *c; ++c) {
-        *c = (char)toupper((unsigned char)*c);
-    }
-
     int left = 0;
     int right = 0;
 
-    if (sscanf(p, "MOTOR %d %d", &left, &right) == 2) {
+    if (sscanf(line, "MOTOR %d %d", &left, &right) == 2) {
         left = constrain(left, -100, 100);
         right = constrain(right, -100, 100);
 
@@ -408,16 +343,12 @@ void handle_motor_line(const char* line, Print* ackPort) {
             ackPort->print(" ");
             ackPort->println(bt_right_motor_cmd);
         }
-
-        // Apply immediately so USB serial commands take effect without waiting
-        // for the next scheduled motor task tick.
-        apply_motor_outputs();
         return;
     }
 
     {
         int ll = 100, lh = 100, rl = 100, rh = 100;
-        if (sscanf(p, "TRIM %d %d %d %d", &ll, &lh, &rl, &rh) == 4) {
+        if (sscanf(line, "TRIM %d %d %d %d", &ll, &lh, &rl, &rh) == 4) {
             ll = constrain(ll, 50, 150); lh = constrain(lh, 50, 150);
             rl = constrain(rl, 50, 150); rh = constrain(rh, 50, 150);
 
@@ -432,46 +363,22 @@ void handle_motor_line(const char* line, Print* ackPort) {
                 ackPort->print(" R:");
                 ackPort->print(rl); ackPort->print("/"); ackPort->println(rh);
             }
-
-            apply_motor_outputs();
             return;
         }
     }
 
-    if (strcmp(p, "STOP") == 0) {
+    if (strcmp(line, "STOP") == 0) {
         bt_left_motor_cmd = 0;
         bt_right_motor_cmd = 0;
         bt_last_cmd_ms = millis();
         if (ackPort != nullptr) {
             ackPort->println("ACK STOP");
         }
-
-        apply_motor_outputs();
-        return;
-    }
-
-    if (strcmp(p, "ENCODER") == 0) {
-        if (ackPort != nullptr) {
-            ackPort->print("ENCODER L:");
-            ackPort->print(dcMotor.getEncoderCount());
-            ackPort->print(" R:");
-            ackPort->println(dcMotor2.getEncoderCount());
-        }
-        return;
-    }
-
-    if (strcmp(p, "ENCODER RESET") == 0) {
-        dcMotor.resetEncoderCount();
-        dcMotor2.resetEncoderCount();
-        if (ackPort != nullptr) {
-            ackPort->println("ACK ENCODER RESET");
-        }
         return;
     }
 
     if (ackPort != nullptr) {
-        ackPort->print("ERR Unknown command: ");
-        ackPort->println(p);
+        ackPort->println("ERR Unknown command");
     }
 }
 
@@ -607,7 +514,6 @@ void pin_init(){
 
     pinMode(IO_POWER, OUTPUT);              //Pin 49 is used to enable IO power
     digitalWrite(IO_POWER, 1);              //Enable IO power on main CPU board
-    delay(300);                             //allow rail to stabilize
     // Initialise electromagnet pin (analog connector used as digital output)
     pinMode(MAGNET_PIN, OUTPUT);
     digitalWrite(MAGNET_PIN, LOW); // ensure off by default
@@ -616,8 +522,6 @@ void pin_init(){
     // Pulse electromagnet HIGH for 100 ms for initial test
     printlnBoth("Pulsing electromagnet HIGH for 100 ms\n");
     digitalWrite(MAGNET_PIN, HIGH);
-    delay(100);
-    digitalWrite(MAGNET_PIN, LOW);
 }
 
 //**********************************************************************************
@@ -706,17 +610,15 @@ void robot_init() {
         
         // Calibrate gyroscope to zero on startup
         calibrate_gyroscope();
+        
+        printlnBoth("Initialising DC Motor...");
+        dcMotor.begin();
+        dcMotor2.begin();  // Uncomment if using a second motor
+        
+        printlnBoth("Robot is ready \n");
     } else {
         printfBoth("ERROR: Failed to initialise IMU! Error code: %d\n", init_result);
     }
-
-    printlnBoth("Initialising DC Motor...");
-    dcMotor.begin();
-    dcMotor2.begin();  // Uncomment if using a second motor
-
-    startup_motor_test();
-
-    printlnBoth("Robot is ready \n");
 }
 
 //**********************************************************************************
@@ -786,8 +688,8 @@ void task_init() {
 void loop() {
     // Consume inbound Bluetooth control commands continuously
     process_bluetooth_motor_commands();
-    // Also accept commands from USB serial monitor (direct wired testing)
-    process_usb_motor_commands();
+        // Also accept commands from USB serial monitor (direct wired testing)
+        process_usb_motor_commands();
   
   taskManager.execute();    //execute the scheduler
   //Serial.println("Another scheduler execution cycle has oocured \n");
