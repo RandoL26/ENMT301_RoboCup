@@ -165,11 +165,6 @@ CH9143Bluetooth bluetooth(&Serial3, BLUETOOTH_RX_PIN, BLUETOOTH_TX_PIN, BLUETOOT
 int16_t bt_left_motor_cmd = 0;
 int16_t bt_right_motor_cmd = 0;
 unsigned long bt_last_cmd_ms = 0;
-int16_t motor_trim_left_lo  = 100;
-int16_t motor_trim_left_hi  = 100;
-int16_t motor_trim_right_lo = 100;
-int16_t motor_trim_right_hi = 100;
-bool    motor_dither_toggle = false;  // alternates each callback tick
 
 // Forward declarations for Bluetooth command handling
 void process_bluetooth_motor_commands(void);
@@ -247,17 +242,9 @@ void imu_task_callback(void) {
 
 // Task wrapper for DC motor control
 void dc_motor_callback(void) {
-    // Dither: alternate between lo and hi trim each tick to simulate a mid value
-    motor_dither_toggle = !motor_dither_toggle;
-    int16_t ltrim = motor_dither_toggle ? motor_trim_left_lo  : motor_trim_left_hi;
-    int16_t rtrim = motor_dither_toggle ? motor_trim_right_lo : motor_trim_right_hi;
-
-    int16_t left_out  = (int16_t)constrain((bt_left_motor_cmd  * ltrim) / 100, -100, 100);
-    int16_t right_out = (int16_t)constrain((bt_right_motor_cmd * rtrim) / 100, -100, 100);
-
     // Latch behavior: hold last commanded speeds until changed
-    dcMotor.setSpeed(left_out);
-    dcMotor2.setSpeed(right_out);
+    dcMotor.setSpeed(bt_left_motor_cmd);
+    dcMotor2.setSpeed(bt_right_motor_cmd);
 }
 
 // Read and parse newline-terminated commands from Bluetooth link
@@ -322,8 +309,6 @@ void process_usb_motor_commands(void) {
 
 // Supported commands:
 //   MOTOR <left> <right>           where left/right are in [-100, 100]
-//   TRIM <l_lo> <l_hi> <r_lo> <r_hi>  dither between lo/hi each tick (all in [50,150])
-//                                  set lo==hi for a fixed trim (e.g. TRIM 100 100 100 100)
 //   STOP
 void handle_motor_line(const char* line, Print* ackPort) {
     int left = 0;
@@ -344,27 +329,6 @@ void handle_motor_line(const char* line, Print* ackPort) {
             ackPort->println(bt_right_motor_cmd);
         }
         return;
-    }
-
-    {
-        int ll = 100, lh = 100, rl = 100, rh = 100;
-        if (sscanf(line, "TRIM %d %d %d %d", &ll, &lh, &rl, &rh) == 4) {
-            ll = constrain(ll, 50, 150); lh = constrain(lh, 50, 150);
-            rl = constrain(rl, 50, 150); rh = constrain(rh, 50, 150);
-
-            motor_trim_left_lo  = (int16_t)ll;
-            motor_trim_left_hi  = (int16_t)lh;
-            motor_trim_right_lo = (int16_t)rl;
-            motor_trim_right_hi = (int16_t)rh;
-
-            if (ackPort != nullptr) {
-                ackPort->print("ACK TRIM L:");
-                ackPort->print(ll); ackPort->print("/"); ackPort->print(lh);
-                ackPort->print(" R:");
-                ackPort->print(rl); ackPort->print("/"); ackPort->println(rh);
-            }
-            return;
-        }
     }
 
     if (strcmp(line, "STOP") == 0) {
