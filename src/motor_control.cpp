@@ -84,8 +84,10 @@ void motorControlProcessSerialCommand(Stream& serial) {
     serial.println("Unknown command. Use: PID SHOW | PID KP <v> | PID KI <v> | PID KD <v> | PID IMAX <v> | PID MINSPD <0-100> | PID LOOPMS <1-1000>");
 }
 
-MotorControl::MotorControl(uint8_t leftMotorPin, uint8_t rightMotorPin)
-    : leftMotor(leftMotorPin), rightMotor(rightMotorPin) {
+MotorControl::MotorControl(uint8_t leftMotorPin, uint8_t leftEncA, uint8_t leftEncB,
+                           uint8_t rightMotorPin, uint8_t rightEncA, uint8_t rightEncB)
+    : leftMotor(leftMotorPin, leftEncA, leftEncB),
+      rightMotor(rightMotorPin, rightEncA, rightEncB) {
 }
 
 float MotorControl::normalizeAngle360(float angleDeg) {
