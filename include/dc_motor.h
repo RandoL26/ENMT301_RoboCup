@@ -15,6 +15,19 @@ private:
     Servo servo;
     uint8_t pin;
     int16_t current_speed;  // Range: -100 to 100
+    uint8_t encoderPinA;
+    uint8_t encoderPinB;
+    volatile int32_t encoderPulses;
+    volatile bool directionForward;
+    volatile uint8_t encoderPinALast;
+    bool encoderConfigured;
+    uint8_t motorIndex;
+
+    static DCMotor* instances[2];
+    static void encoderISR0();
+    static void encoderISR1();
+    void handleEncoderInterrupt();
+
     static const int16_t MIN_SPEED = -100;
     static const int16_t MAX_SPEED = 100;
     static const uint16_t NEUTRAL_PULSE = 1500;  // 1.5ms = stop/neutral
@@ -22,7 +35,7 @@ private:
     static const uint16_t MAX_PULSE = 2000;      // 2ms = full forward
     
 public:
-    DCMotor(uint8_t motor_pin);
+    DCMotor(uint8_t motor_pin, uint8_t enc_pin_a, uint8_t enc_pin_b);
     
     // Initialize motor on the specified pin
     void begin(void);
@@ -39,6 +52,12 @@ public:
     
     // Check if speed value is within valid range
     bool isValidSpeed(int16_t speed) const;
+
+    // Get current encoder pulse count
+    int32_t getEncoderPulses(void) const;
+
+    // Reset encoder pulse count to zero
+    void resetEncoderPulses(void);
     
     // Print motor status to serial
     void printStatus(void) const;

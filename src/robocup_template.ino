@@ -92,10 +92,10 @@
 // Pin deffinitions
 #define IO_POWER  49
 #define PROXIMITY_SENSOR_PIN  20  // A6Z
-#define ULTRASONIC_TRIGGER_PIN_1  3   // D2Z - Sensor 1 Trigger
-#define ULTRASONIC_ECHO_PIN_1     2   // D3Z - Sensor 1 Echo
-#define ULTRASONIC_TRIGGER_PIN_2  5   // Sensor 2 Trigger (adjust as needed)
-#define ULTRASONIC_ECHO_PIN_2     4   // Sensor 2 Echo (adjust as needed)
+// #define ULTRASONIC_TRIGGER_PIN_1  3   // D2Z - Sensor 1 Trigger
+// #define ULTRASONIC_ECHO_PIN_1     2   // D3Z - Sensor 1 Echo
+// #define ULTRASONIC_TRIGGER_PIN_2  5   // Sensor 2 Trigger (adjust as needed)
+// #define ULTRASONIC_ECHO_PIN_2     4   // Sensor 2 Echo (adjust as needed)
 #define IR_DISTANCE_SENSOR_PIN    A9  // Analog pin for 2Y0A02 IR distance sensor
 
 
@@ -106,6 +106,10 @@ const uint8_t VL53L1X_XSHUT_PINS[VL53L1X_SENSOR_COUNT] = { 18 };  // Update this
 // DC Motor PIN definitions
 #define DC_M1_PIN 0              //PWM pin for DC motor control (can be extended to 2 motors)
 #define DC_M2_PIN 1              //PWM pin for DC motor control (can be extended to 2 motors)
+#define DC_M1_ENC_A 2            //Encoder A pin for motor 1 (D2)
+#define DC_M1_ENC_B 3            //Encoder B pin for motor 1 (D3)
+#define DC_M2_ENC_A 4            //Encoder A pin for motor 2 (D4)
+#define DC_M2_ENC_B 5            //Encoder B pin for motor 2 (D5)
 #define MOTOR_SPEED 80           // Example motor speed (set to desired value)
 
 //electromagnet PIN definition
@@ -128,8 +132,8 @@ Servo right_motor;
 Servo left_motor;
 
 // DC Motor instance (Channel 1)
-DCMotor dcMotor(DC_M1_PIN);
-DCMotor dcMotor2(DC_M2_PIN);  // Uncomment if using a second motor
+DCMotor dcMotor(DC_M1_PIN, DC_M1_ENC_A, DC_M1_ENC_B);
+DCMotor dcMotor2(DC_M2_PIN, DC_M2_ENC_A, DC_M2_ENC_B);  // Uncomment if using a second motor
 
 // BNO055 IMU structure
 struct bno055_t bno055;
@@ -141,7 +145,7 @@ IMU_Data current_imu_data;
 ProximitySensor proximitySensor(PROXIMITY_SENSOR_PIN);
 
 // Ultrasonic Sensor instance (kept for backwards compatibility)
-UltrasonicSensor ultrasonicSensor(ULTRASONIC_TRIGGER_PIN_1, ULTRASONIC_ECHO_PIN_1);
+// UltrasonicSensor ultrasonicSensor(ULTRASONIC_TRIGGER_PIN_1, ULTRASONIC_ECHO_PIN_1);
 
 // Ultrasonic Sensor Array for 2 sensors
 UltrasonicSensorArray ultrasonicArray(2);
@@ -245,6 +249,19 @@ void dc_motor_callback(void) {
     // Latch behavior: hold last commanded speeds until changed
     dcMotor.setSpeed(bt_left_motor_cmd);
     dcMotor2.setSpeed(bt_right_motor_cmd);
+
+    // Print encoder pulse counts to USB serial at a limited rate
+    static unsigned long lastEncoderPrintMs = 0;
+    const unsigned long encoderPrintPeriodMs = 200;
+    unsigned long now = millis();
+
+    if (now - lastEncoderPrintMs >= encoderPrintPeriodMs) {
+        Serial.print("ENC L:");
+        Serial.print(dcMotor.getEncoderPulses());
+        Serial.print(" R:");
+        Serial.println(dcMotor2.getEncoderPulses());
+        lastEncoderPrintMs = now;
+    }
 }
 
 // Read and parse newline-terminated commands from Bluetooth link
@@ -354,7 +371,7 @@ void herkulex_test_callback() {
     Herkulex.torqueON(HERKULEX_ID);
     Herkulex.moveOneAngle(HERKULEX_ID, angle, 1000, led);
     Herkulex.moveOneAngle(HERKULEX_ID, -100, 1000, LED_BLUE);
-    printfBoth("Herkulex test move to %d\n", Herkulex.getPosition(HERKULEX_ID));
+    //printfBoth("Herkulex test move to %d\n", Herkulex.getPosition(HERKULEX_ID));
     toggle = !toggle;
 }
 
@@ -495,10 +512,10 @@ void robot_init() {
     printlnBoth("Initialising Proximity Sensor...");
     proximitySensor.begin();
     
-    printlnBoth("Initialising Ultrasonic Sensor Array...");
-    ultrasonicArray.addSensor(0, ULTRASONIC_TRIGGER_PIN_1, ULTRASONIC_ECHO_PIN_1);
-    ultrasonicArray.addSensor(1, ULTRASONIC_TRIGGER_PIN_2, ULTRASONIC_ECHO_PIN_2);
-    ultrasonicArray.begin();
+    // printlnBoth("Initialising Ultrasonic Sensor Array...");
+    // ultrasonicArray.addSensor(0, ULTRASONIC_TRIGGER_PIN_1, ULTRASONIC_ECHO_PIN_1);
+    // ultrasonicArray.addSensor(1, ULTRASONIC_TRIGGER_PIN_2, ULTRASONIC_ECHO_PIN_2);
+    // ultrasonicArray.begin();
     
     printlnBoth("Initialising Color Sensor...");
     colorSensor.begin();
