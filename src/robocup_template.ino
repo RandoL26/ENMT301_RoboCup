@@ -259,7 +259,7 @@ void dc_motor_callback(void) {
         Serial.print("ENC L:");
         Serial.print(dcMotor.getEncoderPulses());
         Serial.print(" R:");
-        Serial.println(dcMotor2.getEncoderPulses());
+        Serial.println(-dcMotor2.getEncoderPulses());
         lastEncoderPrintMs = now;
     }
 }
@@ -332,7 +332,7 @@ void handle_motor_line(const char* line, Print* ackPort) {
     int right = 0;
 
     if (sscanf(line, "MOTOR %d %d", &left, &right) == 2) {
-        left = constrain(left, -100, 100);
+        left = constrain(left - 14, -100, 100);
         right = constrain(right, -100, 100);
 
         bt_left_motor_cmd = (int16_t)left;
@@ -344,6 +344,16 @@ void handle_motor_line(const char* line, Print* ackPort) {
             ackPort->print(bt_left_motor_cmd);
             ackPort->print(" ");
             ackPort->println(bt_right_motor_cmd);
+        }
+        return;
+    }
+
+    if (strcmp(line, "FWRD1") == 0) {
+        bt_left_motor_cmd = 50 - 14;
+        bt_right_motor_cmd = 50;
+        bt_last_cmd_ms = millis();
+        if (ackPort != nullptr) {
+            ackPort->println("ACK 50 50");
         }
         return;
     }
@@ -670,7 +680,7 @@ void loop() {
     // Consume inbound Bluetooth control commands continuously
     process_bluetooth_motor_commands();
         // Also accept commands from USB serial monitor (direct wired testing)
-        process_usb_motor_commands();
+    process_usb_motor_commands();
   
   taskManager.execute();    //execute the scheduler
   //Serial.println("Another scheduler execution cycle has oocured \n");
