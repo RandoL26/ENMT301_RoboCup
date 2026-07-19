@@ -36,6 +36,7 @@
 #include "ir_distance_sensor.h"     //2Y0A02 IR distance sensor
 #include "tof_sensor_array.h"       //TOF (VL53L1X) sensor array
 #include "dc_motor.h"               //DC motor control 
+#include "motor_control.h"          //PID/SYNC command handling
 #include "ch9143_bluetooth.h"       //CH9143 Bluetooth module
 
 //**********************************************************************************
@@ -98,7 +99,6 @@
 // #define ULTRASONIC_ECHO_PIN_2     4   // Sensor 2 Echo (adjust as needed)
 #define IR_DISTANCE_SENSOR_PIN    A9  // Analog pin for 2Y0A02 IR distance sensor
 
-
 // VL53L1X sensor configuration
 const uint8_t VL53L1X_SENSOR_COUNT = 1;  // Update this if you add more sensors
 const uint8_t VL53L1X_XSHUT_PINS[VL53L1X_SENSOR_COUNT] = { 18 };  // Update this with the XSHUT pins for each sensor
@@ -131,9 +131,9 @@ const uint8_t VL53L1X_XSHUT_PINS[VL53L1X_SENSOR_COUNT] = { 18 };  // Update this
 Servo right_motor;
 Servo left_motor;
 
-// DC Motor instance (Channel 1)
-DCMotor dcMotor(DC_M1_PIN, DC_M1_ENC_A, DC_M1_ENC_B);
-DCMotor dcMotor2(DC_M2_PIN, DC_M2_ENC_A, DC_M2_ENC_B);  // Uncomment if using a second motor
+// Centralized motor control instance (includes straight-line sync PID)
+MotorControl driveMotor(DC_M1_PIN, DC_M1_ENC_A, DC_M1_ENC_B,
+                        DC_M2_PIN, DC_M2_ENC_A, DC_M2_ENC_B);
 
 // BNO055 IMU structure
 struct bno055_t bno055;
@@ -165,12 +165,12 @@ TOFSensorArray tofSensorArray(VL53L1X_SENSOR_COUNT);
 // CH9143 Bluetooth instance
 CH9143Bluetooth bluetooth(&Serial3, BLUETOOTH_RX_PIN, BLUETOOTH_TX_PIN, BLUETOOTH_BAUD);
 
-// Bluetooth motor command state (received from PC/Xbox bridge)
-int16_t bt_left_motor_cmd = 0;
-int16_t bt_right_motor_cmd = 0;
-unsigned long bt_last_cmd_ms = 0;
+// Motor command state (received from Serial or Bluetooth)
+int16_t cmd_left_motor = 0;
+int16_t cmd_right_motor = 0;
+unsigned long cmd_last_rx_ms = 0;
 
-// Forward declarations for Bluetooth command handling
+// Forward declarations for command handling
 void process_bluetooth_motor_commands(void);
 void process_usb_motor_commands(void);
 void handle_motor_line(const char* line, Print* ackPort);
@@ -246,9 +246,11 @@ void imu_task_callback(void) {
 
 // Task wrapper for DC motor control
 void dc_motor_callback(void) {
+    int16_t left_cmd = cmd_left_motor;
+    int16_t right_cmd = cmd_right_motor;
+
     // Latch behavior: hold last commanded speeds until changed
-    dcMotor.setSpeed(bt_left_motor_cmd);
-    dcMotor2.setSpeed(bt_right_motor_cmd);
+    driveMotor.setSpeeds(left_cmd, right_cmd);
 
     // Print encoder pulse counts to USB serial at a limited rate
     static unsigned long lastEncoderPrintMs = 0;
@@ -257,9 +259,9 @@ void dc_motor_callback(void) {
 
     if (now - lastEncoderPrintMs >= encoderPrintPeriodMs) {
         Serial.print("ENC L:");
-        Serial.print(dcMotor.getEncoderPulses());
+        Serial.print(driveMotor.getLeftEncoderPulses());
         Serial.print(" R:");
-        Serial.println(dcMotor2.getEncoderPulses());
+        Serial.println(driveMotor.getRightEncoderPulses());
         lastEncoderPrintMs = now;
     }
 }
@@ -327,39 +329,52 @@ void process_usb_motor_commands(void) {
 // Supported commands:
 //   MOTOR <left> <right>           where left/right are in [-100, 100]
 //   STOP
+//   PID ... / SYNC ...             handled by motor_control.cpp
 void handle_motor_line(const char* line, Print* ackPort) {
+    // Convert input line to uppercase for case-insensitive command matching
+    char upperLine[64];
+    strncpy(upperLine, line, sizeof(upperLine) - 1);
+    upperLine[sizeof(upperLine) - 1] = '\0';
+    for (int i = 0; upperLine[i] != '\0'; i++) {
+        upperLine[i] = toupper((unsigned char)upperLine[i]);
+    }
+
     int left = 0;
     int right = 0;
 
-    if (sscanf(line, "MOTOR %d %d", &left, &right) == 2) {
+    if (sscanf(upperLine, "MOTOR %d %d", &left, &right) == 2) {
         left = constrain(left, -100, 100);
         right = constrain(right, -100, 100);
 
-        bt_left_motor_cmd = (int16_t)left;
-        bt_right_motor_cmd = (int16_t)right;
-        bt_last_cmd_ms = millis();
+        cmd_left_motor = (int16_t)left;
+        cmd_right_motor = (int16_t)right;
+        cmd_last_rx_ms = millis();
 
         if (ackPort != nullptr) {
             ackPort->print("ACK MOTOR ");
-            ackPort->print(bt_left_motor_cmd);
+            ackPort->print(cmd_left_motor);
             ackPort->print(" ");
-            ackPort->println(bt_right_motor_cmd);
+            ackPort->println(cmd_right_motor);
         }
         return;
     }
 
-    if (strcmp(line, "STOP") == 0) {
-        bt_left_motor_cmd = 0;
-        bt_right_motor_cmd = 0;
-        bt_last_cmd_ms = millis();
+    if (strcmp(upperLine, "STOP") == 0) {
+        cmd_left_motor = 0;
+        cmd_right_motor = 0;
+        cmd_last_rx_ms = millis();
         if (ackPort != nullptr) {
             ackPort->println("ACK STOP");
         }
         return;
     }
 
+    if (motorControlHandleCommandLine(upperLine, ackPort)) {
+        return;
+    }
+
     if (ackPort != nullptr) {
-        ackPort->println("ERR Unknown command");
+        ackPort->println("ERR Unknown command (MOTOR <L> <R>, STOP, PID..., SYNC...)");
     }
 }
 
@@ -593,8 +608,7 @@ void robot_init() {
         calibrate_gyroscope();
         
         printlnBoth("Initialising DC Motor...");
-        dcMotor.begin();
-        dcMotor2.begin();  // Uncomment if using a second motor
+        driveMotor.begin();
         
         printlnBoth("Robot is ready \n");
     } else {
@@ -669,8 +683,8 @@ void task_init() {
 void loop() {
     // Consume inbound Bluetooth control commands continuously
     process_bluetooth_motor_commands();
-        // Also accept commands from USB serial monitor (direct wired testing)
-        process_usb_motor_commands();
+    // Also accept commands from USB serial monitor (direct wired testing)
+    process_usb_motor_commands();
   
   taskManager.execute();    //execute the scheduler
   //Serial.println("Another scheduler execution cycle has oocured \n");

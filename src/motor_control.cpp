@@ -12,6 +12,15 @@ float TURN_PID_INTEGRAL_LIMIT = 120.0f;
 int16_t TURN_PID_MIN_SPEED = 20;
 uint16_t TURN_PID_LOOP_DELAY_MS = 10;
 
+// Straight-line encoder synchronization PID tuning (runtime adjustable).
+bool STRAIGHT_SYNC_ENABLED = true;
+float STRAIGHT_SYNC_KP = 0.15f;
+float STRAIGHT_SYNC_KI = 0.05f;
+float STRAIGHT_SYNC_KD = 0.10f;
+int16_t STRAIGHT_SYNC_MAX_CORRECTION = 20;
+int16_t STRAIGHT_SYNC_MIN_SPEED = 20;
+float STRAIGHT_SYNC_INTEGRAL_MAX = 50.0f;
+
 // Print the current runtime tuning values.
 void motorControlPrintPidConfig(Stream& serial) {
     serial.println("PID CONFIG:");
@@ -21,6 +30,162 @@ void motorControlPrintPidConfig(Stream& serial) {
     serial.print("IMAX="); serial.println(TURN_PID_INTEGRAL_LIMIT, 4);
     serial.print("MINSPD="); serial.println(TURN_PID_MIN_SPEED);
     serial.print("LOOPMS="); serial.println(TURN_PID_LOOP_DELAY_MS);
+}
+
+bool motorControlHandleCommandLine(const char* inputLine, Print* out) {
+    if (inputLine == nullptr) {
+        return false;
+    }
+
+    String line = inputLine;
+    line.trim();
+    if (line.length() == 0) {
+        return false;
+    }
+
+    line.toUpperCase();
+
+    auto printUnknown = [&]() {
+        if (out != nullptr) {
+            out->println("Unknown command. Use: PID SHOW | PID KP <v> | PID KI <v> | PID KD <v> | PID IMAX <v> | PID MINSPD <0-100> | PID LOOPMS <1-1000> | SYNC SHOW | SYNC ON | SYNC OFF | SYNC KP <v> | SYNC KI <v> | SYNC KD <v> | SYNC MAX <1-100> | SYNC MIN <0-100>");
+        }
+    };
+
+    if (line == "PID SHOW") {
+        if (out != nullptr) {
+            out->println("PID CONFIG:");
+            out->print("KP="); out->println(TURN_PID_KP, 4);
+            out->print("KI="); out->println(TURN_PID_KI, 4);
+            out->print("KD="); out->println(TURN_PID_KD, 4);
+            out->print("IMAX="); out->println(TURN_PID_INTEGRAL_LIMIT, 4);
+            out->print("MINSPD="); out->println(TURN_PID_MIN_SPEED);
+            out->print("LOOPMS="); out->println(TURN_PID_LOOP_DELAY_MS);
+        }
+        return true;
+    }
+
+    float value = 0.0f;
+    int intValue = 0;
+
+    if (sscanf(line.c_str(), "PID KP %f", &value) == 1) {
+        TURN_PID_KP = value;
+        if (out != nullptr) {
+            out->print("OK KP="); out->println(TURN_PID_KP, 4);
+        }
+        return true;
+    }
+
+    if (sscanf(line.c_str(), "PID KI %f", &value) == 1) {
+        TURN_PID_KI = value;
+        if (out != nullptr) {
+            out->print("OK KI="); out->println(TURN_PID_KI, 4);
+        }
+        return true;
+    }
+
+    if (sscanf(line.c_str(), "PID KD %f", &value) == 1) {
+        TURN_PID_KD = value;
+        if (out != nullptr) {
+            out->print("OK KD="); out->println(TURN_PID_KD, 4);
+        }
+        return true;
+    }
+
+    if (sscanf(line.c_str(), "PID IMAX %f", &value) == 1) {
+        TURN_PID_INTEGRAL_LIMIT = value;
+        if (out != nullptr) {
+            out->print("OK IMAX="); out->println(TURN_PID_INTEGRAL_LIMIT, 4);
+        }
+        return true;
+    }
+
+    if (sscanf(line.c_str(), "PID MINSPD %d", &intValue) == 1) {
+        TURN_PID_MIN_SPEED = (int16_t)constrain(intValue, 0, 100);
+        if (out != nullptr) {
+            out->print("OK MINSPD="); out->println(TURN_PID_MIN_SPEED);
+        }
+        return true;
+    }
+
+    if (sscanf(line.c_str(), "PID LOOPMS %d", &intValue) == 1) {
+        TURN_PID_LOOP_DELAY_MS = (uint16_t)constrain(intValue, 1, 1000);
+        if (out != nullptr) {
+            out->print("OK LOOPMS="); out->println(TURN_PID_LOOP_DELAY_MS);
+        }
+        return true;
+    }
+
+    if (line == "SYNC SHOW") {
+        if (out != nullptr) {
+            out->println("SYNC CONFIG:");
+            out->print("ENABLED="); out->println(STRAIGHT_SYNC_ENABLED ? 1 : 0);
+            out->print("KP="); out->println(STRAIGHT_SYNC_KP, 4);
+            out->print("KI="); out->println(STRAIGHT_SYNC_KI, 4);
+            out->print("KD="); out->println(STRAIGHT_SYNC_KD, 4);
+            out->print("MAX="); out->println(STRAIGHT_SYNC_MAX_CORRECTION);
+            out->print("MIN="); out->println(STRAIGHT_SYNC_MIN_SPEED);
+        }
+        return true;
+    }
+
+    if (line == "SYNC ON") {
+        STRAIGHT_SYNC_ENABLED = true;
+        if (out != nullptr) {
+            out->println("OK SYNC ON");
+        }
+        return true;
+    }
+
+    if (line == "SYNC OFF") {
+        STRAIGHT_SYNC_ENABLED = false;
+        if (out != nullptr) {
+            out->println("OK SYNC OFF");
+        }
+        return true;
+    }
+
+    if (sscanf(line.c_str(), "SYNC KP %f", &value) == 1) {
+        STRAIGHT_SYNC_KP = value;
+        if (out != nullptr) {
+            out->print("OK SYNC KP="); out->println(STRAIGHT_SYNC_KP, 4);
+        }
+        return true;
+    }
+
+    if (sscanf(line.c_str(), "SYNC KI %f", &value) == 1) {
+        STRAIGHT_SYNC_KI = value;
+        if (out != nullptr) {
+            out->print("OK SYNC KI="); out->println(STRAIGHT_SYNC_KI, 4);
+        }
+        return true;
+    }
+
+    if (sscanf(line.c_str(), "SYNC KD %f", &value) == 1) {
+        STRAIGHT_SYNC_KD = value;
+        if (out != nullptr) {
+            out->print("OK SYNC KD="); out->println(STRAIGHT_SYNC_KD, 4);
+        }
+        return true;
+    }
+
+    if (sscanf(line.c_str(), "SYNC MAX %d", &intValue) == 1) {
+        STRAIGHT_SYNC_MAX_CORRECTION = (int16_t)constrain(intValue, 1, 100);
+        if (out != nullptr) {
+            out->print("OK SYNC MAX="); out->println(STRAIGHT_SYNC_MAX_CORRECTION);
+        }
+        return true;
+    }
+
+    if (sscanf(line.c_str(), "SYNC MIN %d", &intValue) == 1) {
+        STRAIGHT_SYNC_MIN_SPEED = (int16_t)constrain(intValue, 0, 100);
+        if (out != nullptr) {
+            out->print("OK SYNC MIN="); out->println(STRAIGHT_SYNC_MIN_SPEED);
+        }
+        return true;
+    }
+
+    printUnknown();
+    return false;
 }
 
 void motorControlProcessSerialCommand(Stream& serial) {
@@ -34,60 +199,25 @@ void motorControlProcessSerialCommand(Stream& serial) {
     if (line.length() == 0) {
         return;
     }
-
-    line.toUpperCase();
-
-    if (line == "PID SHOW") {
-        motorControlPrintPidConfig(serial);
-        return;
-    }
-
-    float value = 0.0f;   // For floating-point commands (KP, KI, KD, IMAX)
-
-    if (sscanf(line.c_str(), "PID KP %f", &value) == 1) {
-        TURN_PID_KP = value;
-        serial.print("OK KP="); serial.println(TURN_PID_KP, 4);
-        return;
-    }
-
-    if (sscanf(line.c_str(), "PID KI %f", &value) == 1) {
-        TURN_PID_KI = value;
-        serial.print("OK KI="); serial.println(TURN_PID_KI, 4);
-        return;
-    }
-
-    if (sscanf(line.c_str(), "PID KD %f", &value) == 1) {
-        TURN_PID_KD = value;
-        serial.print("OK KD="); serial.println(TURN_PID_KD, 4);
-        return;
-    }
-
-    if (sscanf(line.c_str(), "PID IMAX %f", &value) == 1) {
-        TURN_PID_INTEGRAL_LIMIT = value;
-        serial.print("OK IMAX="); serial.println(TURN_PID_INTEGRAL_LIMIT, 4);
-        return;
-    }
-
-    int intValue = 0;     // For integer commands (MINSPD, LOOPMS)
-    if (sscanf(line.c_str(), "PID MINSPD %d", &intValue) == 1) {
-        TURN_PID_MIN_SPEED = (int16_t)constrain(intValue, 0, 100);
-        serial.print("OK MINSPD="); serial.println(TURN_PID_MIN_SPEED);
-        return;
-    }
-
-    if (sscanf(line.c_str(), "PID LOOPMS %d", &intValue) == 1) {
-        TURN_PID_LOOP_DELAY_MS = (uint16_t)constrain(intValue, 1, 1000);
-        serial.print("OK LOOPMS="); serial.println(TURN_PID_LOOP_DELAY_MS);
-        return;
-    }
-
-    serial.println("Unknown command. Use: PID SHOW | PID KP <v> | PID KI <v> | PID KD <v> | PID IMAX <v> | PID MINSPD <0-100> | PID LOOPMS <1-1000>");
+    motorControlHandleCommandLine(line.c_str(), &serial);
 }
 
 MotorControl::MotorControl(uint8_t leftMotorPin, uint8_t leftEncA, uint8_t leftEncB,
                            uint8_t rightMotorPin, uint8_t rightEncA, uint8_t rightEncB)
     : leftMotor(leftMotorPin, leftEncA, leftEncB),
-      rightMotor(rightMotorPin, rightEncA, rightEncB) {
+      rightMotor(rightMotorPin, rightEncA, rightEncB),
+      syncLastLeftEncoderPulses(0),
+      syncLastRightEncoderPulses(0),
+      syncLastMs(0),
+      syncInitialized(false),
+      syncIntegralError(0.0f),
+      syncLastError(0.0f),
+      lastCmdLeftSpeed(0),
+      lastCmdRightSpeed(0),
+      lastLeftEncoderPulses(0),
+      lastRightEncoderPulses(0),
+      lastEncoderSampleMs(0),
+      encoderRateInitialized(false) {
 }
 
 float MotorControl::normalizeAngle360(float angleDeg) {
@@ -116,6 +246,10 @@ float MotorControl::shortestAngleError(float targetDeg, float currentDeg) {
 void MotorControl::begin(void) {
     leftMotor.begin();
     rightMotor.begin();
+    lastLeftEncoderPulses = leftMotor.getEncoderPulses();
+    lastRightEncoderPulses = rightMotor.getEncoderPulses();
+    lastEncoderSampleMs = millis();
+    encoderRateInitialized = true;
 }
 
 void MotorControl::setLeft(int16_t speed) {
@@ -127,8 +261,26 @@ void MotorControl::setRight(int16_t speed) {
 }
 
 void MotorControl::setSpeeds(int16_t leftSpeed, int16_t rightSpeed) {
+    // Detect command change and reset sync state to avoid carryover error
+    if (leftSpeed != lastCmdLeftSpeed || rightSpeed != lastCmdRightSpeed) {
+        syncInitialized = false;
+        syncIntegralError = 0.0f;
+        syncLastError = 0.0f;
+        lastCmdLeftSpeed = leftSpeed;
+        lastCmdRightSpeed = rightSpeed;
+    }
+    
+    applyStraightSpeedSync(leftSpeed, rightSpeed);
     leftMotor.setSpeed(leftSpeed);
     rightMotor.setSpeed(rightSpeed);
+}
+
+int32_t MotorControl::getLeftEncoderPulses(void) const {
+    return leftMotor.getEncoderPulses();
+}
+
+int32_t MotorControl::getRightEncoderPulses(void) const {
+    return rightMotor.getEncoderPulses();
 }
 
 void MotorControl::turnLeft(void) {
@@ -229,4 +381,87 @@ bool MotorControl::turnToAngle(float targetAngleDeg,
 void MotorControl::stop(void) {
     leftMotor.stop();
     rightMotor.stop();
+}
+
+void MotorControl::applyStraightSpeedSync(int16_t& leftSpeed, int16_t& rightSpeed) {
+    if (!STRAIGHT_SYNC_ENABLED) {
+        return;
+    }
+
+    const bool sameDirection = ((leftSpeed > 0 && rightSpeed > 0) || (leftSpeed < 0 && rightSpeed < 0));
+    const bool sameMagnitude = (abs(leftSpeed) == abs(rightSpeed));
+    const bool aboveMinSpeed = (abs(leftSpeed) >= STRAIGHT_SYNC_MIN_SPEED);
+
+    if (!(sameDirection && sameMagnitude && aboveMinSpeed)) {
+        // CRITICAL: Reset integral during idle to prevent windup
+        // This prevents accumulated error from fighting motor during next acceleration
+        syncInitialized = false;
+        syncIntegralError = 0.0f;
+        syncLastError = 0.0f;
+        syncLastLeftEncoderPulses = leftMotor.getEncoderPulses();
+        syncLastRightEncoderPulses = rightMotor.getEncoderPulses();
+        syncLastMs = millis();
+        return;
+    }
+
+    unsigned long now = millis();
+    int32_t leftNow = leftMotor.getEncoderPulses();
+    int32_t rightNow = rightMotor.getEncoderPulses();
+
+    if (!syncInitialized) {
+        syncLastLeftEncoderPulses = leftNow;
+        syncLastRightEncoderPulses = rightNow;
+        syncLastMs = now;
+        syncInitialized = true;
+        return;
+    }
+
+    unsigned long dtMs = now - syncLastMs;
+    if (dtMs == 0) {
+        return;
+    }
+
+    int32_t dLeft = leftNow - syncLastLeftEncoderPulses;
+    int32_t dRight = rightNow - syncLastRightEncoderPulses;
+
+    syncLastLeftEncoderPulses = leftNow;
+    syncLastRightEncoderPulses = rightNow;
+    syncLastMs = now;
+
+    // Calculate mismatch (error) in pulses/sec
+    float leftRate = ((float)abs(dLeft) * 1000.0f) / (float)dtMs;
+    float rightRate = ((float)abs(dRight) * 1000.0f) / (float)dtMs;
+    float error = leftRate - rightRate;
+
+    // PID calculation
+    float dt = (float)dtMs / 1000.0f;
+
+    // Proportional term
+    float pTerm = STRAIGHT_SYNC_KP * error;
+
+    // Integral term with anti-windup
+    syncIntegralError += error * dt;
+    if (syncIntegralError > STRAIGHT_SYNC_INTEGRAL_MAX) {
+        syncIntegralError = STRAIGHT_SYNC_INTEGRAL_MAX;
+    } else if (syncIntegralError < -STRAIGHT_SYNC_INTEGRAL_MAX) {
+        syncIntegralError = -STRAIGHT_SYNC_INTEGRAL_MAX;
+    }
+    float iTerm = STRAIGHT_SYNC_KI * syncIntegralError;
+
+    // Derivative term
+    float dTerm = STRAIGHT_SYNC_KD * (error - syncLastError) / dt;
+    syncLastError = error;
+
+    // PID output
+    float pidOutput = pTerm + iTerm + dTerm;
+    int16_t correction = (int16_t)roundf(pidOutput);
+    correction = (int16_t)constrain((int)correction,
+                                    -(int)STRAIGHT_SYNC_MAX_CORRECTION,
+                                    (int)STRAIGHT_SYNC_MAX_CORRECTION);
+
+    int16_t l = (int16_t)(leftSpeed - correction);
+    int16_t r = (int16_t)(rightSpeed + correction);
+
+    leftSpeed = (int16_t)constrain((int)l, -100, 100);
+    rightSpeed = (int16_t)constrain((int)r, -100, 100);
 }

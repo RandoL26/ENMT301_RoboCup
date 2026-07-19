@@ -9,6 +9,7 @@
 #include <stdint.h>
 
 class Stream;
+class Print;
 
 // Global PID turning parameters (runtime tunable).
 // Values are defined in motor_control.cpp and can be changed via serial commands.
@@ -19,10 +20,38 @@ extern float TURN_PID_INTEGRAL_LIMIT;
 extern int16_t TURN_PID_MIN_SPEED;
 extern uint16_t TURN_PID_LOOP_DELAY_MS;
 
+// Straight-line encoder synchronization parameters (PID control).
+extern bool STRAIGHT_SYNC_ENABLED;
+extern float STRAIGHT_SYNC_KP;
+extern float STRAIGHT_SYNC_KI;
+extern float STRAIGHT_SYNC_KD;
+extern int16_t STRAIGHT_SYNC_MAX_CORRECTION;
+extern int16_t STRAIGHT_SYNC_MIN_SPEED;
+extern float STRAIGHT_SYNC_INTEGRAL_MAX;
+
 class MotorControl {
 private:
     DCMotor leftMotor;
     DCMotor rightMotor;
+    
+    // Straight-line PID sync state
+    int32_t syncLastLeftEncoderPulses;
+    int32_t syncLastRightEncoderPulses;
+    unsigned long syncLastMs;
+    bool syncInitialized;
+    float syncIntegralError;    // Integral accumulator
+    float syncLastError;        // Previous error for derivative
+    int16_t lastCmdLeftSpeed;   // Track command changes
+    int16_t lastCmdRightSpeed;  // Track command changes
+
+    // Apply PID-based correction from encoder pulse-rate mismatch.
+    void applyStraightSpeedSync(int16_t& leftSpeed, int16_t& rightSpeed);
+    
+    // Older encoder rate state (deprecated, kept for compatibility)
+    int32_t lastLeftEncoderPulses;
+    int32_t lastRightEncoderPulses;
+    unsigned long lastEncoderSampleMs;
+    bool encoderRateInitialized;
 
     // Normalize any angle to [0, 360).
     static float normalizeAngle360(float angleDeg);
@@ -38,6 +67,8 @@ public:
     void setRight(int16_t speed);
     // Set track speeds independently in range [-100, 100].
     void setSpeeds(int16_t leftSpeed, int16_t rightSpeed);
+    int32_t getLeftEncoderPulses(void) const;
+    int32_t getRightEncoderPulses(void) const;
     // Full left turn for tracks: left = -100, right = 100
     void turnLeft(void);
     // Full right turn for tracks: left = 100, right = -100
@@ -63,7 +94,14 @@ public:
 //   PID IMAX 120
 //   PID MINSPD 20
 //   PID LOOPMS 10
+//   SYNC SHOW
+//   SYNC KP 0.15
+//   SYNC KI 0.05
+//   SYNC KD 0.10
+//   SYNC MAX 20
+//   SYNC MIN 20
 void motorControlProcessSerialCommand(Stream& serial);
 void motorControlPrintPidConfig(Stream& serial);
+bool motorControlHandleCommandLine(const char* line, Print* out = nullptr);
 
 #endif /* MOTOR_CONTROL_H_ */
