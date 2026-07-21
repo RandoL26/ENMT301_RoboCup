@@ -124,9 +124,9 @@ const uint8_t VL53L1X_XSHUT_PINS[VL53L1X_SENSOR_COUNT] = { 18 };  // Update this
 
 // Serial deffinitions
 #define BAUD_RATE 115200
-#define BLUETOOTH_BAUD 9600
-#define BLUETOOTH_RX_PIN 0  // Serial3 RX (try this)
-#define BLUETOOTH_TX_PIN 1  // Serial3 TX (try this)
+#define BLUETOOTH_BAUD 115200  // CH9143 factory default UART baud rate
+#define BLUETOOTH_RX_PIN 28  // Serial7 RX
+#define BLUETOOTH_TX_PIN 29  // Serial7 TX
 
 Servo right_motor;
 Servo left_motor;
@@ -163,7 +163,7 @@ IRDistanceSensor irDistanceSensor(IR_DISTANCE_SENSOR_PIN);
 TOFSensorArray tofSensorArray(VL53L1X_SENSOR_COUNT);
 
 // CH9143 Bluetooth instance
-CH9143Bluetooth bluetooth(&Serial3, BLUETOOTH_RX_PIN, BLUETOOTH_TX_PIN, BLUETOOTH_BAUD);
+CH9143Bluetooth bluetooth(&Serial7, BLUETOOTH_RX_PIN, BLUETOOTH_TX_PIN, BLUETOOTH_BAUD);
 
 // Motor command state (received from Serial or Bluetooth)
 int16_t cmd_left_motor = 0;
@@ -266,6 +266,16 @@ void dc_motor_callback(void) {
     }
 }
 
+// Bluetooth stream test — called every 200 ms by the task scheduler.
+// Sends a counter, timestamp, and motor command state so you can verify
+// the BT link is live and measure throughput on the remote end.
+void bt_stream_test_callback(void) {
+    static uint32_t pkt = 0;
+    if (!bluetooth.isInitialized()) return;
+    bluetooth.printf("PKT:%lu T:%lu L:%d R:%d\n",
+        pkt++, millis(), (int)cmd_left_motor, (int)cmd_right_motor);
+}
+
 // Read and parse newline-terminated commands from Bluetooth link
 void process_bluetooth_motor_commands(void) {
     static char lineBuffer[64];
@@ -281,7 +291,7 @@ void process_bluetooth_motor_commands(void) {
         if (c == '\n') {
             lineBuffer[idx] = '\0';
             if (idx > 0) {
-                handle_motor_line(lineBuffer, bluetooth.isInitialized() ? (Print*)&Serial3 : nullptr);
+                handle_motor_line(lineBuffer, bluetooth.isInitialized() ? (Print*)&Serial7 : nullptr);
             }
             idx = 0;
             continue;
@@ -410,6 +420,7 @@ Task tVL53L1X_sensor(VL53L1X_SENSOR_READ_PERIOD, VL53L1X_SENSOR_NUM_EXECUTE, &vl
 Task tIR_Distance_sensor(IR_DISTANCE_SENSOR_READ_PERIOD, IR_DISTANCE_SENSOR_NUM_EXECUTE, &ir_distance_sensor_callback);
 Task tSensor_average(SENSOR_AVERAGE_PERIOD,      SENSOR_AVERAGE_NUM_EXECUTE,      &sensor_average);
 Task tHerkulexTest(HERKULEX_TEST_PERIOD, -1, &herkulex_test_callback);
+Task tBT_stream_test(200, -1, &bt_stream_test_callback);  // Stream test: every 200ms
 
 // Task for DC motor control
 Task tDC_motor(DC_MOTOR_CONTROL_PERIOD,          DC_MOTOR_CONTROL_NUM_EXECUTE,    &dc_motor_callback);
@@ -482,12 +493,11 @@ void setup() {
   delay(2000);  // Give USB serial time to stabilize
   Serial.println("\n\n=== RoboCup Robot Starting ===");
   
-  // Test Serial3 directly before initializing Bluetooth class
-  Serial3.begin(BLUETOOTH_BAUD);
-  delay(100);
-  Serial.println("Testing Serial3...");
-  Serial3.println("DIRECT_TEST: Serial3 Working");
-  Serial3.flush();
+  // CH9143 two-chip bridge architecture:
+  //   PC (USB-C) --> CH9143 [USB chip]  ~~~BLE~~~  CH9143 [UART chip] --> Serial7 --> Teensy
+  // The UART chip communicates at 115200 (CH9143 factory default).
+  // No Bluetooth pairing needed on the PC \u2014 it connects via USB-C to the USB chip.
+  Serial7.begin(BLUETOOTH_BAUD);
   
   Wire.begin();        // MUST be called FIRST - before any I2C operations
   pin_init();
@@ -648,6 +658,7 @@ void task_init() {
   //taskManager.addTask(tVictory_dance);      
 
     taskManager.addTask(tHerkulexTest);
+    taskManager.addTask(tBT_stream_test);  // Bluetooth stream test
 
     //enable the tasks
   tRead_ultrasonic.enable();
@@ -671,6 +682,7 @@ void task_init() {
  //tCheck_watchdog.enable();
  //tVictory_dance.enable();
    tHerkulexTest.enable();
+   tBT_stream_test.enable();
 
  printlnBoth("Tasks have been initialised \n");
 }
