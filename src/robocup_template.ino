@@ -497,7 +497,7 @@ void setup() {
   //   PC (USB-C) --> CH9143 [USB chip]  ~~~BLE~~~  CH9143 [UART chip] --> Serial7 --> Teensy
   // The UART chip communicates at 115200 (CH9143 factory default).
   // No Bluetooth pairing needed on the PC \u2014 it connects via USB-C to the USB chip.
-  Serial7.begin(BLUETOOTH_BAUD);
+    // Serial7 is initialized by bluetooth.begin() during robot_init().
   
   Wire.begin();        // MUST be called FIRST - before any I2C operations
   pin_init();

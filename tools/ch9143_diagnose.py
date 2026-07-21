@@ -127,7 +127,7 @@ def stream_port(port: str, baud: int):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CH9143 Bluetooth diagnostic tool")
+    parser = argparse.ArgumentParser(description="CH9143 USB-Serial diagnostic tool")
     parser.add_argument("--list",   action="store_true", help="List available COM ports and exit")
     parser.add_argument("--scan",   action="store_true", help="Scan all ports at common bauds")
     parser.add_argument("--port",   help="COM port to use (e.g. COM7)")
@@ -154,7 +154,7 @@ def main():
                 print("\nChecklist:")
                 print("  - Is another application (Serial Monitor, xbox_bt_motor_control.py) holding the port?")
                 print("  - Is the port number correct?  Run --list to check.")
-                print("  - Is the baud rate correct?  Factory default is 9600.")
+                print("  - Is the baud rate correct?  CH9143 UART default is 115200.")
             elif r["data"]:
                 print(f"SUCCESS — received data:\n{r['data']}")
             else:
