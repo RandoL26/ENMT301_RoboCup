@@ -17,8 +17,8 @@ public:
     // serialPort: pointer to HardwareSerial object (e.g., &Serial1)
     // rxPin: RX pin number
     // txPin: TX pin number
-    // baudRate: baud rate (default 9600 for CH9143)
-    CH9143Bluetooth(HardwareSerial* serialPort, uint8_t rxPin, uint8_t txPin, uint32_t baudRate = 9600);
+    // baudRate: baud rate (default 115200 for CH9143)
+    CH9143Bluetooth(HardwareSerial* serialPort, uint8_t rxPin, uint8_t txPin, uint32_t baudRate = 115200);
     
     // Destructor
     ~CH9143Bluetooth();

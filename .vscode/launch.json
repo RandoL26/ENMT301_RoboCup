@@ -12,9 +12,15 @@
             "type": "platformio-debug",
             "request": "launch",
             "name": "PIO Debug",
+<<<<<<< HEAD
             "executable": "P:/TEMP/ENMT301_RoboCup/.pio/build/teensy40/firmware.elf",
             "projectEnvName": "teensy40",
             "toolchainBinDir": "C:/Users/bjm242/.platformio/packages/toolchain-gccarmnoneeabi-teensy/bin",
+=======
+            "executable": "C:/Users/MFI77/OneDrive - University of Canterbury/3rd Year S1/ENMT301/Robocup/ENMT301_RoboCup/.pio/build/teensy40/firmware.elf",
+            "projectEnvName": "teensy40",
+            "toolchainBinDir": "C:/Users/MFI77/.platformio/packages/toolchain-gccarmnoneeabi-teensy/bin",
+>>>>>>> 06a8b0252727226b9defbdf97023176652321a92
             "internalConsoleOptions": "openOnSessionStart",
             "preLaunchTask": {
                 "type": "PlatformIO",
@@ -25,18 +31,30 @@
             "type": "platformio-debug",
             "request": "launch",
             "name": "PIO Debug (skip Pre-Debug)",
+<<<<<<< HEAD
             "executable": "P:/TEMP/ENMT301_RoboCup/.pio/build/teensy40/firmware.elf",
             "projectEnvName": "teensy40",
             "toolchainBinDir": "C:/Users/bjm242/.platformio/packages/toolchain-gccarmnoneeabi-teensy/bin",
+=======
+            "executable": "C:/Users/MFI77/OneDrive - University of Canterbury/3rd Year S1/ENMT301/Robocup/ENMT301_RoboCup/.pio/build/teensy40/firmware.elf",
+            "projectEnvName": "teensy40",
+            "toolchainBinDir": "C:/Users/MFI77/.platformio/packages/toolchain-gccarmnoneeabi-teensy/bin",
+>>>>>>> 06a8b0252727226b9defbdf97023176652321a92
             "internalConsoleOptions": "openOnSessionStart"
         },
         {
             "type": "platformio-debug",
             "request": "launch",
             "name": "PIO Debug (without uploading)",
+<<<<<<< HEAD
             "executable": "P:/TEMP/ENMT301_RoboCup/.pio/build/teensy40/firmware.elf",
             "projectEnvName": "teensy40",
             "toolchainBinDir": "C:/Users/bjm242/.platformio/packages/toolchain-gccarmnoneeabi-teensy/bin",
+=======
+            "executable": "C:/Users/MFI77/OneDrive - University of Canterbury/3rd Year S1/ENMT301/Robocup/ENMT301_RoboCup/.pio/build/teensy40/firmware.elf",
+            "projectEnvName": "teensy40",
+            "toolchainBinDir": "C:/Users/MFI77/.platformio/packages/toolchain-gccarmnoneeabi-teensy/bin",
+>>>>>>> 06a8b0252727226b9defbdf97023176652321a92
             "internalConsoleOptions": "openOnSessionStart",
             "loadMode": "manual"
         }
