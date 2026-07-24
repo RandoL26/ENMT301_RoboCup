@@ -24,7 +24,7 @@ Mixing formula:
     right = throttle - turn
 
 Requirements:
-    pip install pygame pyserial
+    pip install pygame pyserial                         
 
 Finding the COM port:
     - Open Device Manager -> Ports (COM & LPT)
@@ -78,9 +78,15 @@ def mix_left_stick_to_tracks(x: float, y: float, max_speed: int) -> tuple[int, i
     return left_cmd, right_cmd
 
 
-def send_motor_command(ser: serial.Serial, left: int, right: int) -> None:
+def send_motor_command(ser: serial.Serial, left: int, right: int, echo: bool = False) -> None:
+    """Send motor command to serial and optionally echo to console.
+
+    If `echo` is True the sent line is printed to stdout.
+    """
     line = f"MOTOR {left} {right}\n"
     ser.write(line.encode("utf-8"))
+    if echo:
+        print(f"-> {line.strip()}")
 
 
 def main() -> int:
@@ -91,7 +97,10 @@ def main() -> int:
     parser.add_argument("--max-speed", type=int, default=100, help="Motor command magnitude limit (default: 100)")
     parser.add_argument("--rate", type=float, default=25.0, help="Command update rate in Hz (default: 25)")
     parser.add_argument("--print-rate", type=float, default=4.0, help="Console status print rate in Hz (default: 4)")
+    parser.add_argument("--echo", action="store_true", help="Echo each sent MOTOR command to the console")
     args = parser.parse_args()
+
+    echo = bool(args.echo)
 
     deadzone = clamp(args.deadzone, 0.0, 0.9)
     max_speed = int(clamp(args.max_speed, 1, 100))
@@ -146,7 +155,7 @@ def main() -> int:
 
             # Send when command changed, or periodically to keep watchdog/safety happy.
             if (left_cmd != last_left) or (right_cmd != last_right):
-                send_motor_command(ser, left_cmd, right_cmd)
+                send_motor_command(ser, left_cmd, right_cmd, echo)
                 last_left, last_right = left_cmd, right_cmd
 
             now = time.time()
@@ -159,7 +168,7 @@ def main() -> int:
     finally:
         # Safety stop on exit
         try:
-            send_motor_command(ser, 0, 0)
+            send_motor_command(ser, 0, 0, echo)
         except Exception:
             pass
 
