@@ -101,7 +101,7 @@
 
 // VL53L1X sensor configuration
 const uint8_t VL53L1X_SENSOR_COUNT = 1;  // Update this if you add more sensors
-const uint8_t VL53L1X_XSHUT_PINS[VL53L1X_SENSOR_COUNT] = { 0 };  // Update this with the XSHUT pins for each sensor
+const uint8_t VL53L1X_XSHUT_PINS[VL53L1X_SENSOR_COUNT] = { 18 };  // Update this with the XSHUT pins for each sensor
 
 // DC Motor PIN definitions
 #define DC_M1_PIN 0              //PWM pin for DC motor control (can be extended to 2 motors)
@@ -159,8 +159,8 @@ IRXYPosition irXYSensor;
 // IR Distance Sensor instance (2Y0A02)
 IRDistanceSensor irDistanceSensor(IR_DISTANCE_SENSOR_PIN);
 
-// TOF Sensor Array instance (explicit SX1509 I2C address 0x3F)
-TOFSensorArray tofSensorArray(VL53L1X_SENSOR_COUNT, 0x3F);
+// TOF Sensor Array instance
+TOFSensorArray tofSensorArray(VL53L1X_SENSOR_COUNT);
 
 // CH9143 Bluetooth instance
 CH9143Bluetooth bluetooth(&Serial7, BLUETOOTH_RX_PIN, BLUETOOTH_TX_PIN, BLUETOOTH_BAUD);
@@ -646,7 +646,7 @@ void task_init() {
     taskManager.addTask(tVL53L1X_sensor);     //reading VL53L1X sensors
     //taskManager.addTask(tIR_Distance_sensor); //reading IR distance sensor (2Y0A02)  
     // taskManager.addTask(tSensor_average);
-    // taskManager.addTask(tDC_motor);          //DC motor control
+    taskManager.addTask(tDC_motor);          //DC motor control
   // taskManager.addTask(tSet_motor); 
   // taskManager.addTask(tWeight_scan);
   // taskManager.addTask(tCollect_weight);

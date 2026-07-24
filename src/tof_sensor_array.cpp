@@ -29,9 +29,12 @@ bool TOFSensorArray::begin() {
         return false;
     }
     
+    Serial.print("Attempting to initialize IO Expander at address 0x");
+    Serial.println(ioExpanderAddress, HEX);
+    
     // Initialize IO Expander
     if (!ioExpander->begin(ioExpanderAddress)) {
-        Serial.println("Error: Failed to initialize IO Expander");
+        Serial.println("Error: Failed to initialize IO Expander - check I2C connection and address");
         return false;
     }
     
@@ -39,9 +42,14 @@ bool TOFSensorArray::begin() {
     
     // Set I2C clock speed
     Wire.setClock(400000);  // use 400 kHz I2C
+    Serial.println("I2C clock set to 400 kHz");
     
     // Disable/reset all sensors by driving their XSHUT pins low
+    Serial.println("Resetting all TOF sensors (XSHUT LOW)...");
     for (uint8_t i = 0; i < sensorCount; i++) {
+        Serial.print("  Setting pin ");
+        Serial.print(xshutPins[i]);
+        Serial.println(" to OUTPUT");
         ioExpander->pinMode(xshutPins[i], OUTPUT);
         ioExpander->digitalWrite(xshutPins[i], LOW);
     }
@@ -50,10 +58,16 @@ bool TOFSensorArray::begin() {
     
     // Enable, initialize, and start each sensor, one by one
     for (uint8_t i = 0; i < sensorCount; i++) {
-        // Stop driving this sensor's XSHUT low
+        Serial.print("Initializing sensor ");
+        Serial.print(i);
+        Serial.print(" (XSHUT on pin ");
+        Serial.print(xshutPins[i]);
+        Serial.println(")...");
+        
+        // Stop driving this sensor's XSHUT low (bring sensor out of reset)
         ioExpander->digitalWrite(xshutPins[i], HIGH);
         delay(10);
-        
+
         // Initialize sensor
         sensors[i].setTimeout(500);
         if (!sensors[i].init()) {
@@ -61,7 +75,6 @@ bool TOFSensorArray::begin() {
             Serial.println(i);
             return false;
         }
-        
         // Set unique I2C address for each sensor
         sensors[i].setAddress(0x30 + i);
         sensors[i].startContinuous(50);
