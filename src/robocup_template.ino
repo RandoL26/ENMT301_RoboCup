@@ -38,6 +38,7 @@
 #include "dc_motor.h"               //DC motor control 
 #include "motor_control.h"          //PID/SYNC command handling
 #include "ch9143_bluetooth.h"       //CH9143 Bluetooth module
+#include "optical_flow.h"           // PMW3901 optical flow (Bitcraze)
 
 //**********************************************************************************
 // Local Definitions
@@ -63,6 +64,9 @@
 #define VL53L1X_SENSOR_READ_PERIOD          100
 #define IR_DISTANCE_SENSOR_READ_PERIOD      50
 #define DC_MOTOR_CONTROL_PERIOD             40
+
+#define OF_READ_TASK_PERIOD                 40
+#define OF_READ_TASK_NUM_EXECUTE            -1
 
 #define HERKULEX_TEST_PERIOD               1200
 
@@ -144,6 +148,9 @@ IMU_Data current_imu_data;
 // Proximity Sensor instance
 ProximitySensor proximitySensor(PROXIMITY_SENSOR_PIN);
 
+// Optical flow sensor (PMW3901) using SPI: CS on D10, MOSI D11, MISO D12, SCK D13
+OpticalFlow opticalFlow(10);
+
 // Ultrasonic Sensor instance (kept for backwards compatibility)
 // UltrasonicSensor ultrasonicSensor(ULTRASONIC_TRIGGER_PIN_1, ULTRASONIC_ECHO_PIN_1);
 
@@ -212,6 +219,18 @@ void ir_xy_position_callback(void) {
     if (irXYSensor.isInitialized()) {
         IRXYPosition::IRData irData = irXYSensor.readPositions();
         irXYSensor.printPositions(irData);
+    }
+}
+
+// Task wrapper for optical flow sensor reading
+void optical_flow_callback(void) {
+    int16_t dx = 0, dy = 0;
+    if (opticalFlow.read(dx, dy)) {
+        // accumulate counts and print total distance in mm
+        opticalFlow.addMotionCounts(dx, dy);
+        float tx = opticalFlow.getTotalXmm();
+        float ty = opticalFlow.getTotalYmm();
+        printfBoth("OpticalFlow totalX: %.2f mm  totalY: %.2f mm\n", tx, ty);
     }
 }
 
@@ -418,6 +437,7 @@ Task tColor_sensor(COLOUR_READ_TASK_PERIOD, COLOUR_READ_TASK_NUM_EXECUTE, &color
 Task tIR_XY_Position(IR_READ_TASK_PERIOD, IR_READ_TASK_NUM_EXECUTE, &ir_xy_position_callback);
 Task tVL53L1X_sensor(VL53L1X_SENSOR_READ_PERIOD, VL53L1X_SENSOR_NUM_EXECUTE, &vl53l1x_sensor_callback);
 Task tIR_Distance_sensor(IR_DISTANCE_SENSOR_READ_PERIOD, IR_DISTANCE_SENSOR_NUM_EXECUTE, &ir_distance_sensor_callback);
+Task tOpticalFlow(OF_READ_TASK_PERIOD, OF_READ_TASK_NUM_EXECUTE, &optical_flow_callback);
 Task tSensor_average(SENSOR_AVERAGE_PERIOD,      SENSOR_AVERAGE_NUM_EXECUTE,      &sensor_average);
 Task tHerkulexTest(HERKULEX_TEST_PERIOD, -1, &herkulex_test_callback);
 Task tBT_stream_test(200, -1, &bt_stream_test_callback);  // Stream test: every 200ms
@@ -587,6 +607,13 @@ void robot_init() {
     printlnBoth("Initialising IR XY Position Sensor...");
     irXYSensor.begin();
     
+    printlnBoth("Initialising Optical Flow (PMW3901) on SPI CS D10...");
+    if (!opticalFlow.begin()) {
+        printlnBoth("WARNING: Optical Flow init failed");
+    } else {
+        printlnBoth("Optical Flow initialized");
+    }
+
     printlnBoth("Initialising IR Distance Sensor (2Y0A02)...");
     irDistanceSensor.begin();
     
@@ -646,7 +673,7 @@ void task_init() {
     // taskManager.addTask(tVL53L1X_sensor);     //reading VL53L1X sensors
     //taskManager.addTask(tIR_Distance_sensor); //reading IR distance sensor (2Y0A02)  
     // taskManager.addTask(tSensor_average);
-    taskManager.addTask(tDC_motor);          //DC motor control
+    // taskManager.addTask(tDC_motor);          //DC motor control
   // taskManager.addTask(tSet_motor); 
   // taskManager.addTask(tWeight_scan);
   // taskManager.addTask(tCollect_weight);
@@ -657,8 +684,9 @@ void task_init() {
   //taskManager.addTask(tCheck_watchdog);
   //taskManager.addTask(tVictory_dance);      
 
-    taskManager.addTask(tHerkulexTest);
+    // taskManager.addTask(tHerkulexTest);
     taskManager.addTask(tBT_stream_test);  // Bluetooth stream test
+    taskManager.addTask(tOpticalFlow);        //reading optical flow sensor
 
     //enable the tasks
   tRead_ultrasonic.enable();
@@ -683,6 +711,7 @@ void task_init() {
  //tVictory_dance.enable();
    tHerkulexTest.enable();
    tBT_stream_test.enable();
+    tOpticalFlow.enable();
 
  printlnBoth("Tasks have been initialised \n");
 }

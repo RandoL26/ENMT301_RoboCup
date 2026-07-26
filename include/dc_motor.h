@@ -9,6 +9,7 @@
 #define DC_MOTOR_H_
 
 #include <Servo.h>
+#include <QuadEncoder.h>
 
 class DCMotor {
 private:
@@ -17,16 +18,8 @@ private:
     int16_t current_speed;  // Range: -100 to 100
     uint8_t encoderPinA;
     uint8_t encoderPinB;
-    volatile int32_t encoderPulses;
-    volatile bool directionForward;
-    volatile uint8_t encoderPinALast;
-    bool encoderConfigured;
-    uint8_t motorIndex;
-
-    static DCMotor* instances[2];
-    static void encoderISR0();
-    static void encoderISR1();
-    void handleEncoderInterrupt();
+    // Teensy 4 hardware QuadEncoder wrapper
+    QuadEncoder* hwEncoder;
 
     static const int16_t MIN_SPEED = -100;
     static const int16_t MAX_SPEED = 100;
