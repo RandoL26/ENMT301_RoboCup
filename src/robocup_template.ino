@@ -359,6 +359,10 @@ void process_usb_motor_commands(void) {
 //   MOTOR <left> <right>           where left/right are in [-100, 100]
 //   STOP
 //   PID ... / SYNC ...             handled by motor_control.cpp
+//   FLOW RESET                     reset accumulated optical-flow totals
+//   FLOW STATUS                    print optical-flow totals (mm)
+//   FLOW LED <ON|OFF>              enable/disable optical-flow illumination LED
+//   FLOW SCALE <mm_per_count>      set millimetres-per-motion-count scale
 void handle_motor_line(const char* line, Print* ackPort) {
     // Convert input line to uppercase for case-insensitive command matching
     char upperLine[64];
@@ -395,6 +399,60 @@ void handle_motor_line(const char* line, Print* ackPort) {
         if (ackPort != nullptr) {
             ackPort->println("ACK STOP");
         }
+        return;
+    }
+
+    // Optical flow control commands (FLOW ...)
+    if (strncmp(upperLine, "FLOW", 4) == 0) {
+        if (strcmp(upperLine, "FLOW RESET") == 0) {
+            opticalFlow.resetTotals();
+            cmd_last_rx_ms = millis();
+            if (ackPort != nullptr) ackPort->println("ACK FLOW RESET");
+            else Serial.println("ACK FLOW RESET");
+            return;
+        }
+
+        if (strcmp(upperLine, "FLOW STATUS") == 0) {
+            float tx = opticalFlow.getTotalXmm();
+            float ty = opticalFlow.getTotalYmm();
+            if (ackPort != nullptr) {
+                ackPort->printf("FLOW STATUS X: %.2f mm Y: %.2f mm\n", tx, ty);
+            } else {
+                Serial.printf("FLOW STATUS X: %.2f mm Y: %.2f mm\n", tx, ty);
+            }
+            return;
+        }
+
+        if (strncmp(upperLine, "FLOW LED ", 9) == 0) {
+            if (strcmp(upperLine + 9, "ON") == 0) {
+                opticalFlow.setLed(true);
+                if (ackPort != nullptr) ackPort->println("ACK FLOW LED ON");
+                else Serial.println("ACK FLOW LED ON");
+                return;
+            }
+            if (strcmp(upperLine + 9, "OFF") == 0) {
+                opticalFlow.setLed(false);
+                if (ackPort != nullptr) ackPort->println("ACK FLOW LED OFF");
+                else Serial.println("ACK FLOW LED OFF");
+                return;
+            }
+        }
+
+        float scale = 0.0f;
+        if (sscanf(upperLine, "FLOW SCALE %f", &scale) == 1) {
+            opticalFlow.setScaleMMPerCount(scale);
+            if (ackPort != nullptr) {
+                ackPort->print("ACK FLOW SCALE ");
+                ackPort->println(scale);
+            } else {
+                Serial.print("ACK FLOW SCALE ");
+                Serial.println(scale);
+            }
+            return;
+        }
+
+        if (ackPort != nullptr) ackPort->println("ERR Unknown FLOW command (RESET, STATUS, LED, SCALE)");
+        else Serial.println("ERR Unknown FLOW command (RESET, STATUS, LED, SCALE)");
         return;
     }
 
