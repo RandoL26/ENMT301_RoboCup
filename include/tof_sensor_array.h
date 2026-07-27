@@ -18,6 +18,7 @@ private:
     uint8_t ioExpanderAddress;
     bool initialized;
     uint16_t lastDistances[MAX_SENSORS];
+    int16_t distanceOffsets[MAX_SENSORS];
     
 public:
     // Structure to hold distance data from all sensors
@@ -27,7 +28,7 @@ public:
     };
     
     // Constructor
-    TOFSensorArray(uint8_t numSensors = 1, 
+    TOFSensorArray(uint8_t numSensors = 4, 
                    uint8_t ioExpanderAddr = 0x3F);
     
     // Set XSHUT pins for each sensor
@@ -42,6 +43,9 @@ public:
     // Print distance data to serial
     void printDistances(const TOFData& data);
     
+    // Set a per-sensor distance offset (mm)
+    void setDistanceOffset(uint8_t sensorIndex, int16_t offsetMm);
+
     // Get single sensor distance
     uint16_t getDistance(uint8_t sensorIndex);
     

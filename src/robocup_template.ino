@@ -100,8 +100,8 @@
 #define IR_DISTANCE_SENSOR_PIN    A9  // Analog pin for 2Y0A02 IR distance sensor
 
 // VL53L1X sensor configuration
-const uint8_t VL53L1X_SENSOR_COUNT = 1;  // Update this if you add more sensors
-const uint8_t VL53L1X_XSHUT_PINS[VL53L1X_SENSOR_COUNT] = { 0 };  // Update this with the XSHUT pins for each sensor
+const uint8_t VL53L1X_SENSOR_COUNT = 4;  // Update this if you add more sensors
+const uint8_t VL53L1X_XSHUT_PINS[VL53L1X_SENSOR_COUNT] = { 0, 1, 2, 3 };  // Update this with the XSHUT pins for each sensor
 
 // DC Motor PIN definitions
 #define DC_M1_PIN 0              //PWM pin for DC motor control (can be extended to 2 motors)
@@ -601,6 +601,9 @@ void robot_init() {
         printlnBoth("WARNING: Failed to initialize TOF sensor array");
     } else {
         printlnBoth("TOF sensor array initialized successfully");
+        tofSensorArray.setDistanceOffset(0, 0);   // Sensor 0 offset
+        tofSensorArray.setDistanceOffset(1, -40); // Sensor 1 offset
+        tofSensorArray.setDistanceOffset(2, 0);  // Sensor 2 offset
     }
     
     printlnBoth("Initialising IMU (BNO055)...");

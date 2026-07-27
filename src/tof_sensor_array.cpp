@@ -6,8 +6,9 @@ TOFSensorArray::TOFSensorArray(uint8_t numSensors, uint8_t ioExpanderAddr)
     
     // Initialize arrays
     for (uint8_t i = 0; i < MAX_SENSORS; i++) {
-        xshutPins[i] = 0;
+        xshutPins[i] = 0xFF; // invalid marker
         lastDistances[i] = 0;
+        distanceOffsets[i] = 0;
     }
     
     // Create IO expander instance
@@ -16,7 +17,15 @@ TOFSensorArray::TOFSensorArray(uint8_t numSensors, uint8_t ioExpanderAddr)
 
 // Set XSHUT pins for each sensor
 void TOFSensorArray::setXSHUTPins(const uint8_t *pins, uint8_t count) {
-    uint8_t copyCount = (count < MAX_SENSORS) ? count : MAX_SENSORS;
+    if (count < sensorCount) {
+        Serial.println("Error: not enough XSHUT pins configured for TOF sensors");
+        Serial.print("  Expected: ");
+        Serial.print(sensorCount);
+        Serial.print(", got: ");
+        Serial.println(count);
+    }
+
+    uint8_t copyCount = (count < sensorCount) ? count : sensorCount;
     for (uint8_t i = 0; i < copyCount; i++) {
         xshutPins[i] = pins[i];
     }
@@ -103,12 +112,20 @@ TOFSensorArray::TOFData TOFSensorArray::readDistances() {
     
     // Read distance from each sensor
     for (uint8_t i = 0; i < sensorCount; i++) {
-        data.distances[i] = sensors[i].read();
-        lastDistances[i] = data.distances[i];
-        
+        uint16_t rawDistance = sensors[i].read();
         if (sensors[i].timeoutOccurred()) {
             data.distances[i] = 0xFFFF;  // Mark timeout with max value
+            lastDistances[i] = data.distances[i];
+            continue;
         }
+
+        int32_t correctedDistance = (int32_t)rawDistance + distanceOffsets[i];
+        if (correctedDistance < 0) {
+            correctedDistance = 0;
+        }
+
+        data.distances[i] = (uint16_t)correctedDistance;
+        lastDistances[i] = data.distances[i];
     }
     
     return data;
@@ -133,6 +150,13 @@ void TOFSensorArray::printDistances(const TOFData& data) {
         }
     }
     Serial.println();
+}
+
+// Set a per-sensor distance offset (mm)
+void TOFSensorArray::setDistanceOffset(uint8_t sensorIndex, int16_t offsetMm) {
+    if (sensorIndex < sensorCount) {
+        distanceOffsets[sensorIndex] = offsetMm;
+    }
 }
 
 // Get single sensor distance
