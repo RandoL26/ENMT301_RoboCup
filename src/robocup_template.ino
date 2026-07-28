@@ -38,6 +38,7 @@
 #include "dc_motor.h"               //DC motor control 
 #include "motor_control.h"          //PID/SYNC command handling
 #include "ch9143_bluetooth.h"       //CH9143 Bluetooth module
+#include "optical_flow.h"           // PMW3901 optical flow (Bitcraze)
 
 //**********************************************************************************
 // Local Definitions
@@ -63,6 +64,9 @@
 #define VL53L1X_SENSOR_READ_PERIOD          100
 #define IR_DISTANCE_SENSOR_READ_PERIOD      50
 #define DC_MOTOR_CONTROL_PERIOD             40
+
+#define OF_READ_TASK_PERIOD                 40
+#define OF_READ_TASK_NUM_EXECUTE            -1
 
 #define HERKULEX_TEST_PERIOD               1200
 
@@ -124,9 +128,9 @@ const uint8_t VL53L1X_XSHUT_PINS[VL53L1X_SENSOR_COUNT] = { 18 };  // Update this
 
 // Serial deffinitions
 #define BAUD_RATE 115200
-#define BLUETOOTH_BAUD 9600
-#define BLUETOOTH_RX_PIN 0  // Serial3 RX (try this)
-#define BLUETOOTH_TX_PIN 1  // Serial3 TX (try this)
+#define BLUETOOTH_BAUD 115200  // CH9143 factory default UART baud rate
+#define BLUETOOTH_RX_PIN 28  // Serial7 RX
+#define BLUETOOTH_TX_PIN 29  // Serial7 TX
 
 Servo right_motor;
 Servo left_motor;
@@ -143,6 +147,9 @@ IMU_Data current_imu_data;
 
 // Proximity Sensor instance
 ProximitySensor proximitySensor(PROXIMITY_SENSOR_PIN);
+
+// Optical flow sensor (PMW3901) using SPI: CS on D10, MOSI D11, MISO D12, SCK D13
+OpticalFlow opticalFlow(10);
 
 // Ultrasonic Sensor instance (kept for backwards compatibility)
 // UltrasonicSensor ultrasonicSensor(ULTRASONIC_TRIGGER_PIN_1, ULTRASONIC_ECHO_PIN_1);
@@ -163,7 +170,7 @@ IRDistanceSensor irDistanceSensor(IR_DISTANCE_SENSOR_PIN);
 TOFSensorArray tofSensorArray(VL53L1X_SENSOR_COUNT);
 
 // CH9143 Bluetooth instance
-CH9143Bluetooth bluetooth(&Serial3, BLUETOOTH_RX_PIN, BLUETOOTH_TX_PIN, BLUETOOTH_BAUD);
+CH9143Bluetooth bluetooth(&Serial7, BLUETOOTH_RX_PIN, BLUETOOTH_TX_PIN, BLUETOOTH_BAUD);
 
 // Motor command state (received from Serial or Bluetooth)
 int16_t cmd_left_motor = 0;
@@ -212,6 +219,18 @@ void ir_xy_position_callback(void) {
     if (irXYSensor.isInitialized()) {
         IRXYPosition::IRData irData = irXYSensor.readPositions();
         irXYSensor.printPositions(irData);
+    }
+}
+
+// Task wrapper for optical flow sensor reading
+void optical_flow_callback(void) {
+    int16_t dx = 0, dy = 0;
+    if (opticalFlow.read(dx, dy)) {
+        // accumulate counts and print total distance in mm
+        opticalFlow.addMotionCounts(dx, dy);
+        float tx = opticalFlow.getTotalXmm();
+        float ty = opticalFlow.getTotalYmm();
+        printfBoth("OpticalFlow totalX: %.2f mm  totalY: %.2f mm\n", tx, ty);
     }
 }
 
@@ -266,6 +285,16 @@ void dc_motor_callback(void) {
     }
 }
 
+// Bluetooth stream test — called every 200 ms by the task scheduler.
+// Sends a counter, timestamp, and motor command state so you can verify
+// the BT link is live and measure throughput on the remote end.
+void bt_stream_test_callback(void) {
+    static uint32_t pkt = 0;
+    if (!bluetooth.isInitialized()) return;
+    bluetooth.printf("PKT:%lu T:%lu L:%d R:%d\n",
+        pkt++, millis(), (int)cmd_left_motor, (int)cmd_right_motor);
+}
+
 // Read and parse newline-terminated commands from Bluetooth link
 void process_bluetooth_motor_commands(void) {
     static char lineBuffer[64];
@@ -281,7 +310,7 @@ void process_bluetooth_motor_commands(void) {
         if (c == '\n') {
             lineBuffer[idx] = '\0';
             if (idx > 0) {
-                handle_motor_line(lineBuffer, bluetooth.isInitialized() ? (Print*)&Serial3 : nullptr);
+                handle_motor_line(lineBuffer, bluetooth.isInitialized() ? (Print*)&Serial7 : nullptr);
             }
             idx = 0;
             continue;
@@ -330,6 +359,10 @@ void process_usb_motor_commands(void) {
 //   MOTOR <left> <right>           where left/right are in [-100, 100]
 //   STOP
 //   PID ... / SYNC ...             handled by motor_control.cpp
+//   FLOW RESET                     reset accumulated optical-flow totals
+//   FLOW STATUS                    print optical-flow totals (mm)
+//   FLOW LED <ON|OFF>              enable/disable optical-flow illumination LED
+//   FLOW SCALE <mm_per_count>      set millimetres-per-motion-count scale
 void handle_motor_line(const char* line, Print* ackPort) {
     // Convert input line to uppercase for case-insensitive command matching
     char upperLine[64];
@@ -366,6 +399,60 @@ void handle_motor_line(const char* line, Print* ackPort) {
         if (ackPort != nullptr) {
             ackPort->println("ACK STOP");
         }
+        return;
+    }
+
+    // Optical flow control commands (FLOW ...)
+    if (strncmp(upperLine, "FLOW", 4) == 0) {
+        if (strcmp(upperLine, "FLOW RESET") == 0) {
+            opticalFlow.resetTotals();
+            cmd_last_rx_ms = millis();
+            if (ackPort != nullptr) ackPort->println("ACK FLOW RESET");
+            else Serial.println("ACK FLOW RESET");
+            return;
+        }
+
+        if (strcmp(upperLine, "FLOW STATUS") == 0) {
+            float tx = opticalFlow.getTotalXmm();
+            float ty = opticalFlow.getTotalYmm();
+            if (ackPort != nullptr) {
+                ackPort->printf("FLOW STATUS X: %.2f mm Y: %.2f mm\n", tx, ty);
+            } else {
+                Serial.printf("FLOW STATUS X: %.2f mm Y: %.2f mm\n", tx, ty);
+            }
+            return;
+        }
+
+        if (strncmp(upperLine, "FLOW LED ", 9) == 0) {
+            if (strcmp(upperLine + 9, "ON") == 0) {
+                opticalFlow.setLed(true);
+                if (ackPort != nullptr) ackPort->println("ACK FLOW LED ON");
+                else Serial.println("ACK FLOW LED ON");
+                return;
+            }
+            if (strcmp(upperLine + 9, "OFF") == 0) {
+                opticalFlow.setLed(false);
+                if (ackPort != nullptr) ackPort->println("ACK FLOW LED OFF");
+                else Serial.println("ACK FLOW LED OFF");
+                return;
+            }
+        }
+
+        float scale = 0.0f;
+        if (sscanf(upperLine, "FLOW SCALE %f", &scale) == 1) {
+            opticalFlow.setScaleMMPerCount(scale);
+            if (ackPort != nullptr) {
+                ackPort->print("ACK FLOW SCALE ");
+                ackPort->println(scale);
+            } else {
+                Serial.print("ACK FLOW SCALE ");
+                Serial.println(scale);
+            }
+            return;
+        }
+
+        if (ackPort != nullptr) ackPort->println("ERR Unknown FLOW command (RESET, STATUS, LED, SCALE)");
+        else Serial.println("ERR Unknown FLOW command (RESET, STATUS, LED, SCALE)");
         return;
     }
 
@@ -408,8 +495,10 @@ Task tColor_sensor(COLOUR_READ_TASK_PERIOD, COLOUR_READ_TASK_NUM_EXECUTE, &color
 Task tIR_XY_Position(IR_READ_TASK_PERIOD, IR_READ_TASK_NUM_EXECUTE, &ir_xy_position_callback);
 Task tVL53L1X_sensor(VL53L1X_SENSOR_READ_PERIOD, VL53L1X_SENSOR_NUM_EXECUTE, &vl53l1x_sensor_callback);
 Task tIR_Distance_sensor(IR_DISTANCE_SENSOR_READ_PERIOD, IR_DISTANCE_SENSOR_NUM_EXECUTE, &ir_distance_sensor_callback);
+Task tOpticalFlow(OF_READ_TASK_PERIOD, OF_READ_TASK_NUM_EXECUTE, &optical_flow_callback);
 Task tSensor_average(SENSOR_AVERAGE_PERIOD,      SENSOR_AVERAGE_NUM_EXECUTE,      &sensor_average);
 Task tHerkulexTest(HERKULEX_TEST_PERIOD, -1, &herkulex_test_callback);
+Task tBT_stream_test(200, -1, &bt_stream_test_callback);  // Stream test: every 200ms
 
 // Task for DC motor control
 Task tDC_motor(DC_MOTOR_CONTROL_PERIOD,          DC_MOTOR_CONTROL_NUM_EXECUTE,    &dc_motor_callback);
@@ -482,12 +571,11 @@ void setup() {
   delay(2000);  // Give USB serial time to stabilize
   Serial.println("\n\n=== RoboCup Robot Starting ===");
   
-  // Test Serial3 directly before initializing Bluetooth class
-  Serial3.begin(BLUETOOTH_BAUD);
-  delay(100);
-  Serial.println("Testing Serial3...");
-  Serial3.println("DIRECT_TEST: Serial3 Working");
-  Serial3.flush();
+  // CH9143 two-chip bridge architecture:
+  //   PC (USB-C) --> CH9143 [USB chip]  ~~~BLE~~~  CH9143 [UART chip] --> Serial7 --> Teensy
+  // The UART chip communicates at 115200 (CH9143 factory default).
+  // No Bluetooth pairing needed on the PC \u2014 it connects via USB-C to the USB chip.
+    // Serial7 is initialized by bluetooth.begin() during robot_init().
   
   Wire.begin();        // MUST be called FIRST - before any I2C operations
   pin_init();
@@ -577,6 +665,13 @@ void robot_init() {
     printlnBoth("Initialising IR XY Position Sensor...");
     irXYSensor.begin();
     
+    printlnBoth("Initialising Optical Flow (PMW3901) on SPI CS D10...");
+    if (!opticalFlow.begin()) {
+        printlnBoth("WARNING: Optical Flow init failed");
+    } else {
+        printlnBoth("Optical Flow initialized");
+    }
+
     printlnBoth("Initialising IR Distance Sensor (2Y0A02)...");
     irDistanceSensor.begin();
     
@@ -636,7 +731,7 @@ void task_init() {
     // taskManager.addTask(tVL53L1X_sensor);     //reading VL53L1X sensors
     //taskManager.addTask(tIR_Distance_sensor); //reading IR distance sensor (2Y0A02)  
     // taskManager.addTask(tSensor_average);
-    taskManager.addTask(tDC_motor);          //DC motor control
+    // taskManager.addTask(tDC_motor);          //DC motor control
   // taskManager.addTask(tSet_motor); 
   // taskManager.addTask(tWeight_scan);
   // taskManager.addTask(tCollect_weight);
@@ -647,7 +742,9 @@ void task_init() {
   //taskManager.addTask(tCheck_watchdog);
   //taskManager.addTask(tVictory_dance);      
 
-    taskManager.addTask(tHerkulexTest);
+    // taskManager.addTask(tHerkulexTest);
+    taskManager.addTask(tBT_stream_test);  // Bluetooth stream test
+    taskManager.addTask(tOpticalFlow);        //reading optical flow sensor
 
     //enable the tasks
   tRead_ultrasonic.enable();
@@ -671,6 +768,8 @@ void task_init() {
  //tCheck_watchdog.enable();
  //tVictory_dance.enable();
    tHerkulexTest.enable();
+   tBT_stream_test.enable();
+    tOpticalFlow.enable();
 
  printlnBoth("Tasks have been initialised \n");
 }

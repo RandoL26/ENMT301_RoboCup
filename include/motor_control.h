@@ -44,6 +44,14 @@ private:
     int16_t lastCmdLeftSpeed;   // Track command changes
     int16_t lastCmdRightSpeed;  // Track command changes
 
+    // Adaptive per-command offset table to compensate persistent motor mismatch.
+    // Index by magnitude [0..100], stores signed offset to apply to left motor
+    // (added to left speed) so that equal commands produce equal encoder rates.
+    bool adaptiveCorrectionEnabled;
+    int8_t adaptiveOffset[101];
+    int8_t adaptiveMaxOffset; // clamp for offsets
+    uint8_t adaptiveLearnThreshold; // minimum pulses/sec difference to trigger learning
+
     // Apply PID-based correction from encoder pulse-rate mismatch.
     void applyStraightSpeedSync(int16_t& leftSpeed, int16_t& rightSpeed);
     
@@ -52,6 +60,27 @@ private:
     int32_t lastRightEncoderPulses;
     unsigned long lastEncoderSampleMs;
     bool encoderRateInitialized;
+    // Per-motor PID control (RPM targets)
+    bool motorPidEnabled;
+    float targetLeftRPM;
+    float targetRightRPM;
+    // PID gains (output maps to -100..100 speed range for an RPM error)
+    float MOTOR_PID_KP;
+    float MOTOR_PID_KI;
+    float MOTOR_PID_KD;
+    // PID state
+    float leftPidIntegral;
+    float rightPidIntegral;
+    float leftPidPrevError;
+    float rightPidPrevError;
+    float motorPidIntegralLimit;
+    // Encoder ticks per revolution (quadrature x4). Set to your encoder CPR*4.
+    float ticksPerRev;
+    // Optional Teensy IntervalTimer-based fixed-rate sampler
+    bool fixedSamplerEnabled;
+    float fixedSamplerDtSec;
+    volatile float sampledLeftRate;   // pulses/sec or RPM depending use
+    volatile float sampledRightRate;
 
     // Normalize any angle to [0, 360).
     static float normalizeAngle360(float angleDeg);
@@ -83,6 +112,32 @@ public:
                      Stream* tuningSerial = nullptr);
 
     void stop(void);
+
+    // Fixed-rate sampling (Teensy IntervalTimer). dtSeconds ~= 0.01f for 100Hz.
+    void enableFixedRateSampler(bool enable, float dtSeconds = 0.01f);
+    // Motor PID control API
+    void enableMotorPid(bool enable);
+    void setTargetRPMs(float leftRpm, float rightRpm);
+    void setMotorPidGains(float kp, float ki, float kd);
+    float getMotorPidKp() const;
+    float getMotorPidKi() const;
+    float getMotorPidKd() const;
+    float getMeasuredLeftRPM() const;
+    float getMeasuredRightRPM() const;
+    bool isMotorPidEnabled() const;
+    float getTargetLeftRPM() const;
+    float getTargetRightRPM() const;
+    void setTicksPerRev(float ticks);
+    float getTicksPerRev() const;
+
+    // Adaptive correction controls
+    void enableAdaptiveCorrection(bool enable);
+    void resetAdaptiveOffsets(void);
+    int8_t getAdaptiveOffset(uint8_t magnitude) const;
+    void setAdaptiveMaxOffset(uint8_t maxOff);
+    void setAdaptiveLearnThreshold(uint8_t thresh);
+    void setAdaptiveOffset(uint8_t magnitude, int8_t offset);
+    bool isAdaptiveEnabled() const;
 };
 
 // Runtime PID tuning over serial (line-based commands).

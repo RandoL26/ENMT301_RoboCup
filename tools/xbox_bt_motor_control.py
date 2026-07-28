@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """
-Xbox -> Bluetooth motor control bridge (PC side).
+Xbox -> CH9143 motor control bridge (PC side).
 
-Reads Xbox controller left stick and sends differential track commands over serial
-(to CH9143 Bluetooth COM port):
+System architecture:
+    PC (USB-C) --> CH9143 [USB chip]  ~~~BLE~~~  CH9143 [UART chip] --> Teensy Serial7
+
+Plug a USB-C cable from the PC into the first CH9143. It enumerates as a standard
+USB Serial Device (no Bluetooth pairing required). The two CH9143 chips pair with
+each other over BLE automatically. Commands flow:
+    PC -> USB Serial -> CH9143 USB chip -> BLE -> CH9143 UART chip -> Serial7 -> Teensy
+
+Reads Xbox controller left stick and sends differential track commands:
 
     MOTOR <left_speed> <right_speed>\n
 Where each speed is in [-100, 100].
@@ -17,10 +24,15 @@ Mixing formula:
     right = throttle - turn
 
 Requirements:
-    pip install pygame pyserial
+    pip install pygame pyserial                         
+
+Finding the COM port:
+    - Open Device Manager -> Ports (COM & LPT)
+    - Look for "USB Serial Device" or "CH9143" after plugging in USB-C
+    - Or run:  python tools/ch9143_diagnose.py --scan
 
 Example:
-    python tools/xbox_bt_motor_control.py --port COM7 --baud 9600
+    python tools/xbox_bt_motor_control.py --port COM7
 """
 
 import argparse
@@ -66,20 +78,29 @@ def mix_left_stick_to_tracks(x: float, y: float, max_speed: int) -> tuple[int, i
     return left_cmd, right_cmd
 
 
-def send_motor_command(ser: serial.Serial, left: int, right: int) -> None:
+def send_motor_command(ser: serial.Serial, left: int, right: int, echo: bool = False) -> None:
+    """Send motor command to serial and optionally echo to console.
+
+    If `echo` is True the sent line is printed to stdout.
+    """
     line = f"MOTOR {left} {right}\n"
     ser.write(line.encode("utf-8"))
+    if echo:
+        print(f"-> {line.strip()}")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Xbox left-stick motor control over CH9143 Bluetooth serial")
-    parser.add_argument("--port", required=True, help="Serial port for CH9143 Bluetooth (e.g. COM7)")
-    parser.add_argument("--baud", type=int, default=9600, help="Serial baud rate (default: 9600)")
+    parser = argparse.ArgumentParser(description="Xbox left-stick motor control via CH9143 USB-C bridge")
+    parser.add_argument("--port", required=True, help="COM port for CH9143 USB chip (e.g. COM7)")
+    parser.add_argument("--baud", type=int, default=115200, help="Serial baud rate (default: 115200)")
     parser.add_argument("--deadzone", type=float, default=0.15, help="Left stick deadzone 0..0.9 (default: 0.15)")
     parser.add_argument("--max-speed", type=int, default=100, help="Motor command magnitude limit (default: 100)")
     parser.add_argument("--rate", type=float, default=25.0, help="Command update rate in Hz (default: 25)")
     parser.add_argument("--print-rate", type=float, default=4.0, help="Console status print rate in Hz (default: 4)")
+    parser.add_argument("--echo", action="store_true", help="Echo each sent MOTOR command to the console")
     args = parser.parse_args()
+
+    echo = bool(args.echo)
 
     deadzone = clamp(args.deadzone, 0.0, 0.9)
     max_speed = int(clamp(args.max_speed, 1, 100))
@@ -134,7 +155,7 @@ def main() -> int:
 
             # Send when command changed, or periodically to keep watchdog/safety happy.
             if (left_cmd != last_left) or (right_cmd != last_right):
-                send_motor_command(ser, left_cmd, right_cmd)
+                send_motor_command(ser, left_cmd, right_cmd, echo)
                 last_left, last_right = left_cmd, right_cmd
 
             now = time.time()
@@ -147,7 +168,7 @@ def main() -> int:
     finally:
         # Safety stop on exit
         try:
-            send_motor_command(ser, 0, 0)
+            send_motor_command(ser, 0, 0, echo)
         except Exception:
             pass
 
