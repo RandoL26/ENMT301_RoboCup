@@ -69,11 +69,12 @@ void DCMotor::setSpeed(int16_t speed) {
     
     current_speed = speed;
     
-    // Convert speed (-100 to 100) to pulse width (1000 to 2000 µs)
+    // Convert speed (-100 to 100) to pulse width (1050 to 1950 µs)
     // Speed 0 = 1500µs (neutral/stop)
-    // Speed -100 = 1000µs (full reverse)
-    // Speed 100 = 2000µs (full forward)
-    uint16_t pulse_width = NEUTRAL_PULSE + (speed * 5);  // Each speed unit = 5µs
+    // Speed -100 = 1050µs (full reverse)
+    // Speed 100 = 1950µs (full forward)
+    uint16_t pulse_width = (uint16_t)map((long)speed, (long)MIN_SPEED, (long)MAX_SPEED,
+                                         (long)MIN_PULSE, (long)MAX_PULSE);
     
     servo.writeMicroseconds(pulse_width);
     

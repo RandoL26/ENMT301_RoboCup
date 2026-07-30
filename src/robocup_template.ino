@@ -177,10 +177,17 @@ int16_t cmd_left_motor = 0;
 int16_t cmd_right_motor = 0;
 unsigned long cmd_last_rx_ms = 0;
 
+// Output shaping for smooth motion (applied to all command sources)
+// tDC_motor runs every 40 ms, so step 8 ~= 200 speed-units/second.
+static int16_t applied_left_motor = 0;
+static int16_t applied_right_motor = 0;
+static const int16_t MOTOR_SLEW_STEP = 8;
+
 // Forward declarations for command handling
 void process_bluetooth_motor_commands(void);
 void process_usb_motor_commands(void);
 void handle_motor_line(const char* line, Print* ackPort);
+int16_t slew_toward(int16_t current, int16_t target, int16_t step);
 
 // Task wrapper for proximity sensor reading
 void proximity_sensor_callback(void) {
@@ -265,11 +272,16 @@ void imu_task_callback(void) {
 
 // Task wrapper for DC motor control
 void dc_motor_callback(void) {
-    int16_t left_cmd = cmd_left_motor;
-    int16_t right_cmd = cmd_right_motor;
+    int16_t left_target = cmd_left_motor;
+    int16_t right_target = cmd_right_motor;
+
+    // Smoothly approach targets to avoid abrupt jumps and harsh reversals.
+    // This ensures transitions like full straight -> full left are gradual.
+    applied_left_motor = slew_toward(applied_left_motor, left_target, MOTOR_SLEW_STEP);
+    applied_right_motor = slew_toward(applied_right_motor, right_target, MOTOR_SLEW_STEP);
 
     // Latch behavior: hold last commanded speeds until changed
-    driveMotor.setSpeeds(left_cmd, right_cmd);
+    driveMotor.setSpeeds(applied_left_motor, applied_right_motor);
 
     // Print encoder pulse counts to USB serial at a limited rate
     static unsigned long lastEncoderPrintMs = 0;
@@ -283,6 +295,22 @@ void dc_motor_callback(void) {
         Serial.println(driveMotor.getRightEncoderPulses());
         lastEncoderPrintMs = now;
     }
+}
+
+int16_t slew_toward(int16_t current, int16_t target, int16_t step) {
+    if (step <= 0) {
+        return target;
+    }
+
+    int delta = (int)target - (int)current;
+    if (delta > step) {
+        delta = step;
+    } else if (delta < -step) {
+        delta = -step;
+    }
+
+    int next = (int)current + delta;
+    return (int16_t)constrain(next, -100, 100);
 }
 
 // Bluetooth stream test — called every 200 ms by the task scheduler.
@@ -731,7 +759,7 @@ void task_init() {
     // taskManager.addTask(tVL53L1X_sensor);     //reading VL53L1X sensors
     //taskManager.addTask(tIR_Distance_sensor); //reading IR distance sensor (2Y0A02)  
     // taskManager.addTask(tSensor_average);
-    // taskManager.addTask(tDC_motor);          //DC motor control
+    taskManager.addTask(tDC_motor);          //DC motor control
   // taskManager.addTask(tSet_motor); 
   // taskManager.addTask(tWeight_scan);
   // taskManager.addTask(tCollect_weight);
@@ -743,8 +771,8 @@ void task_init() {
   //taskManager.addTask(tVictory_dance);      
 
     // taskManager.addTask(tHerkulexTest);
-    taskManager.addTask(tBT_stream_test);  // Bluetooth stream test
-    taskManager.addTask(tOpticalFlow);        //reading optical flow sensor
+    // taskManager.addTask(tBT_stream_test);  // Disabled for control reliability
+    // taskManager.addTask(tOpticalFlow);        //reading optical flow sensor
 
     //enable the tasks
   tRead_ultrasonic.enable();
@@ -768,7 +796,7 @@ void task_init() {
  //tCheck_watchdog.enable();
  //tVictory_dance.enable();
    tHerkulexTest.enable();
-   tBT_stream_test.enable();
+    // tBT_stream_test.enable();  // Disabled for control reliability
     tOpticalFlow.enable();
 
  printlnBoth("Tasks have been initialised \n");
