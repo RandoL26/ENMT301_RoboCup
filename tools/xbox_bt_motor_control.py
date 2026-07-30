@@ -140,28 +140,71 @@ def main() -> int:
     last_left = None
     last_right = None
     last_print = 0.0
+    paused = True  # Start in PAUSED mode
+    last_a_button = False
+    last_status_print = 0.0
+
+    print("\n>>> Initial state: Data stream PAUSED ⏸️")
+    print(">>> Press A button to start\n")
 
     try:
         while running:
-            pygame.event.pump()
+            # Process all pygame events (important for macOS/SDL)
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
 
-            raw_x = joystick.get_axis(0)   # left stick horizontal
-            raw_y = -joystick.get_axis(1)  # invert so up is positive
+            # Check all buttons to debug
+            a_button = joystick.get_button(0)  # Button 0 is 'A' on Xbox controller
+            
+            # Detect button press (rising edge: was False, now True)
+            if a_button and not last_a_button:
+                paused = not paused
+                status = "PAUSED ⏸️" if paused else "RUNNING ▶️"
+                print(f"\n>>> A Button Pressed! Data stream {status}")
+                # Send stop command when pausing
+                if paused:
+                    try:
+                        send_motor_command(ser, 0, 0, echo)
+                        print(">>> Motors stopped (MOTOR 0 0 sent)")
+                    except Exception as e:
+                        print(f">>> Error sending stop command: {e}")
+                last_print = time.time()  # Reset print timer
+            
+            last_a_button = a_button
 
-            x = apply_deadzone(raw_x, deadzone)
-            y = apply_deadzone(raw_y, deadzone)
+            if not paused:
+                raw_x = joystick.get_axis(0)   # left stick horizontal
+                raw_y = -joystick.get_axis(1)  # invert so up is positive
 
-            left_cmd, right_cmd = mix_left_stick_to_tracks(x, y, max_speed)
+                x = apply_deadzone(raw_x, deadzone)
+                y = apply_deadzone(raw_y, deadzone)
 
-            # Send when command changed, or periodically to keep watchdog/safety happy.
-            if (left_cmd != last_left) or (right_cmd != last_right):
-                send_motor_command(ser, left_cmd, right_cmd, echo)
-                last_left, last_right = left_cmd, right_cmd
+                left_cmd, right_cmd = mix_left_stick_to_tracks(x, y, max_speed)
 
-            now = time.time()
-            if now - last_print >= print_period_s:
-                print(f"stick(x={x:+.2f}, y={y:+.2f}) -> L={left_cmd:+4d}, R={right_cmd:+4d}")
-                last_print = now
+                # Send when command changed, or periodically to keep watchdog/safety happy.
+                if (left_cmd != last_left) or (right_cmd != last_right):
+                    try:
+                        send_motor_command(ser, left_cmd, right_cmd, echo)
+                    except Exception as e:
+                        print(f"Error sending motor command: {e}")
+                    last_left, last_right = left_cmd, right_cmd
+
+                now = time.time()
+                if now - last_print >= print_period_s:
+                    print(f"stick(x={x:+.2f}, y={y:+.2f}) -> L={left_cmd:+4d}, R={right_cmd:+4d}")
+                    last_print = now
+            else:
+                # While paused, still show stick input for debugging
+                now = time.time()
+                if now - last_status_print >= 2.0:  # Print every 2 seconds
+                    raw_x = joystick.get_axis(0)
+                    raw_y = -joystick.get_axis(1)
+                    x = apply_deadzone(raw_x, deadzone)
+                    y = apply_deadzone(raw_y, deadzone)
+                    if abs(x) > 0.05 or abs(y) > 0.05:
+                        print(f"[PAUSED] stick(x={x:+.2f}, y={y:+.2f}) - Press A to start")
+                    last_status_print = now
 
             time.sleep(period_s)
 
