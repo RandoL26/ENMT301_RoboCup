@@ -222,6 +222,7 @@ void vl53l1x_sensor_callback(void) {
         TOFSensorArray::TOFData tofData = tofSensorArray.readDistances();
 
         // Print VL53L1X distances inline
+        Serial.print("\t");
         for (uint8_t i = 0; i < tofData.sensorCount; i++) {
             Serial.print("S");
             Serial.print(i);
@@ -239,6 +240,8 @@ void vl53l1x_sensor_callback(void) {
             uint16_t x8buf[64];
             if (TOF_X8_readAll(x8buf, 64)) {
                 // Print each row on its own line, prefixed with a tab for alignment
+                Serial.print('\n');
+                Serial.print('\n');
                 for (uint8_t y = 0; y < 8; y++) {
                     Serial.print('\t');
                     Serial.print("Y");
@@ -250,6 +253,7 @@ void vl53l1x_sensor_callback(void) {
                     }
                     Serial.println();
                 }
+                Serial.print('\n');
             } else {
                 Serial.println('\t',"X8:ERR");
             }

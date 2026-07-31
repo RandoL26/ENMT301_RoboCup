@@ -85,7 +85,8 @@ bool TOFSensorArray::begin() {
             return false;
         }
         // Set unique I2C address for each sensor
-        sensors[i].setAddress(0x30 + i);
+        // Use 0x36..0x39 to avoid colliding with other devices (e.g., 0x33 Matrix Lidar)
+        sensors[i].setAddress(0x36 + i);
         sensors[i].startContinuous(50);
         
         Serial.print("TOF Sensor ");
