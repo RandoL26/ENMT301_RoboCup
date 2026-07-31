@@ -35,6 +35,7 @@
 #include "ir_xy_position.h"         //IR XY position sensor
 #include "ir_distance_sensor.h"     //2Y0A02 IR distance sensor
 #include "tof_sensor_array.h"       //TOF (VL53L1X) sensor array
+#include "TOF_X8.h"                 // DFRobot Matrix Lidar 8x8 (TOF_X8)
 #include "dc_motor.h"               //DC motor control 
 #include "motor_control.h"          //PID/SYNC command handling
 #include "ch9143_bluetooth.h"       //CH9143 Bluetooth module
@@ -219,7 +220,44 @@ void ir_xy_position_callback(void) {
 void vl53l1x_sensor_callback(void) {
     if (tofSensorArray.isInitialized()) {
         TOFSensorArray::TOFData tofData = tofSensorArray.readDistances();
-        tofSensorArray.printDistances(tofData);
+
+        // Print VL53L1X distances inline
+        for (uint8_t i = 0; i < tofData.sensorCount; i++) {
+            Serial.print("S");
+            Serial.print(i);
+            Serial.print(":");
+            if (tofData.distances[i] == 0xFFFF) {
+                Serial.print("TIMEOUT");
+            } else {
+                Serial.print(tofData.distances[i]);
+            }
+            if (i < tofData.sensorCount - 1) Serial.print("\t");
+        }
+
+        // If the DFRobot Matrix Lidar (8x8) is present, print it as 8 rows
+        if (TOF_X8_isInitialized()) {
+            uint16_t x8buf[64];
+            if (TOF_X8_readAll(x8buf, 64)) {
+                // Print each row on its own line, prefixed with a tab for alignment
+                for (uint8_t y = 0; y < 8; y++) {
+                    Serial.print('\t');
+                    Serial.print("Y");
+                    Serial.print(y);
+                    Serial.print(": ");
+                    for (uint8_t x = 0; x < 8; x++) {
+                        Serial.print(x8buf[y * 8 + x]);
+                        if (x < 7) Serial.print(",");
+                    }
+                    Serial.println();
+                }
+            } else {
+                Serial.println('\t',"X8:ERR");
+            }
+        } else {
+            // No X8 initialization; print explicit marker so absence is visible
+            Serial.print('\t');
+            Serial.println("X8:NOTINIT");
+        }
     }
 }
 
@@ -417,6 +455,7 @@ Task tUltrasonic_sensor(ULTRASONIC_SENSOR_READ_PERIOD, ULTRASONIC_SENSOR_NUM_EXE
 Task tColor_sensor(COLOUR_READ_TASK_PERIOD, COLOUR_READ_TASK_NUM_EXECUTE, &color_sensor_callback);
 Task tIR_XY_Position(IR_READ_TASK_PERIOD, IR_READ_TASK_NUM_EXECUTE, &ir_xy_position_callback);
 Task tVL53L1X_sensor(VL53L1X_SENSOR_READ_PERIOD, VL53L1X_SENSOR_NUM_EXECUTE, &vl53l1x_sensor_callback);
+Task tTOF_X8(VL53L1X_SENSOR_READ_PERIOD, VL53L1X_SENSOR_NUM_EXECUTE, &TOF_X8_task_callback);
 Task tIR_Distance_sensor(IR_DISTANCE_SENSOR_READ_PERIOD, IR_DISTANCE_SENSOR_NUM_EXECUTE, &ir_distance_sensor_callback);
 Task tSensor_average(SENSOR_AVERAGE_PERIOD,      SENSOR_AVERAGE_NUM_EXECUTE,      &sensor_average);
 Task tHerkulexTest(HERKULEX_TEST_PERIOD, -1, &herkulex_test_callback);
@@ -605,6 +644,14 @@ void robot_init() {
         tofSensorArray.setDistanceOffset(1, -40); // Sensor 1 offset
         tofSensorArray.setDistanceOffset(2, 0);  // Sensor 2 offset
     }
+
+    // Initialize optional DFRobot Matrix Lidar (8x8 matrix) if connected
+    printlnBoth("Initialising DFRobot Matrix Lidar (TOF_X8)...");
+    if (!TOF_X8_begin()) {
+        printlnBoth("WARNING: TOF_X8 initialization failed or not present");
+    } else {
+        printlnBoth("TOF_X8 initialized successfully");
+    }
     
     printlnBoth("Initialising IMU (BNO055)...");
     BNO055_RETURN_FUNCTION_TYPE init_result = BNO_Init(&bno055);
@@ -647,6 +694,7 @@ void task_init() {
     // taskManager.addTask(tColor_sensor);       //reading color sensor
     // taskManager.addTask(tIR_XY_Position);     //reading IR XY position sensor
     taskManager.addTask(tVL53L1X_sensor);     //reading VL53L1X sensors
+    taskManager.addTask(tTOF_X8);              //reading DFRobot Matrix Lidar 8x8 (if present)
     //taskManager.addTask(tIR_Distance_sensor); //reading IR distance sensor (2Y0A02)  
     // taskManager.addTask(tSensor_average);
     // taskManager.addTask(tDC_motor);          //DC motor control
@@ -674,6 +722,7 @@ void task_init() {
   tIR_XY_Position.enable();
   tVL53L1X_sensor.enable();
   tIR_Distance_sensor.enable();
+    tTOF_X8.enable();
   tSensor_average.enable();
   tDC_motor.enable();
   tSet_motor.enable();
