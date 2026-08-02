@@ -24,8 +24,8 @@ private:
     static const int16_t MIN_SPEED = -100;
     static const int16_t MAX_SPEED = 100;
     static const uint16_t NEUTRAL_PULSE = 1500;  // 1.5ms = stop/neutral
-    static const uint16_t MIN_PULSE = 1000;      // 1ms = full reverse
-    static const uint16_t MAX_PULSE = 2000;      // 2ms = full forward
+    static const uint16_t MIN_PULSE = 1050;      // 1.05ms = full reverse
+    static const uint16_t MAX_PULSE = 1950;      // 1.95ms = full forward
     
 public:
     DCMotor(uint8_t motor_pin, uint8_t enc_pin_a, uint8_t enc_pin_b);
