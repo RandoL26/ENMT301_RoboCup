@@ -1,8 +1,10 @@
 #include "motor_control.h"
 #include "imu_sensor.h"
 #include "Arduino.h"
+#include "optical_flow.h"
 #include <math.h>
 #include <string.h>
+#include <IntervalTimer.h>
 
 // PID tuning globals (can be adjusted at runtime through serial commands).
 float TURN_PID_KP = 1.8f;
@@ -20,6 +22,15 @@ float STRAIGHT_SYNC_KD = 0.10f;
 int16_t STRAIGHT_SYNC_MAX_CORRECTION = 20;
 int16_t STRAIGHT_SYNC_MIN_SPEED = 20;
 float STRAIGHT_SYNC_INTEGRAL_MAX = 50.0f;
+
+// Pointer to the active MotorControl instance (if created). Used by serial
+// command handlers to control adaptive settings for the active controller.
+static MotorControl* gMotorControlInstance = nullptr;
+
+// Optical flow sensor instance is defined in the main sketch (robocup_template.ino)
+extern OpticalFlow opticalFlow;
+
+static IntervalTimer gControlTimer;
 
 // Print the current runtime tuning values.
 void motorControlPrintPidConfig(Stream& serial) {
@@ -47,7 +58,7 @@ bool motorControlHandleCommandLine(const char* inputLine, Print* out) {
 
     auto printUnknown = [&]() {
         if (out != nullptr) {
-            out->println("Unknown command. Use: PID SHOW | PID KP <v> | PID KI <v> | PID KD <v> | PID IMAX <v> | PID MINSPD <0-100> | PID LOOPMS <1-1000> | SYNC SHOW | SYNC ON | SYNC OFF | SYNC KP <v> | SYNC KI <v> | SYNC KD <v> | SYNC MAX <1-100> | SYNC MIN <0-100>");
+            out->println("Unknown command. Use: PID, SYNC, ADAPT, MPID, or FLOW. Example: PID SHOW | SYNC SHOW | ADAPT SHOW | MPID SHOW | FLOW SHOW");
         }
     };
 
@@ -184,6 +195,193 @@ bool motorControlHandleCommandLine(const char* inputLine, Print* out) {
         return true;
     }
 
+    // ADAPT commands: manage the adaptive per-magnitude offset table
+    if (line == "ADAPT SHOW") {
+        if (out != nullptr) {
+            out->println("ADAPT CONFIG:");
+            if (gMotorControlInstance != nullptr) {
+                out->print("ENABLED="); out->println(gMotorControlInstance->isAdaptiveEnabled() ? 1 : 0);
+            } else {
+                out->println("No MotorControl instance");
+            }
+            // Show table summary (non-zero entries)
+            if (gMotorControlInstance != nullptr) {
+                out->println("OFFSETS (mag:off)");
+                for (int m = 0; m <= 100; ++m) {
+                    int8_t o = gMotorControlInstance->getAdaptiveOffset((uint8_t)m);
+                    if (o != 0) {
+                        out->print(m);
+                        out->print(':');
+                        out->println(o);
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    if (line == "ADAPT ON") {
+        if (gMotorControlInstance != nullptr) gMotorControlInstance->enableAdaptiveCorrection(true);
+        if (out != nullptr) out->println("OK ADAPT ON");
+        return true;
+    }
+
+    if (line == "ADAPT OFF") {
+        if (gMotorControlInstance != nullptr) gMotorControlInstance->enableAdaptiveCorrection(false);
+        if (out != nullptr) out->println("OK ADAPT OFF");
+        return true;
+    }
+
+    if (line == "ADAPT RESET") {
+        if (gMotorControlInstance != nullptr) gMotorControlInstance->resetAdaptiveOffsets();
+        if (out != nullptr) out->println("OK ADAPT RESET");
+        return true;
+    }
+
+    if (sscanf(line.c_str(), "ADAPT MAX %d", &intValue) == 1) {
+        if (gMotorControlInstance != nullptr) gMotorControlInstance->setAdaptiveMaxOffset((uint8_t)constrain(intValue, 1, 50));
+        if (out != nullptr) out->print("OK ADAPT MAX="); if (out!=nullptr) out->println(intValue);
+        return true;
+    }
+
+    if (sscanf(line.c_str(), "ADAPT THRESH %d", &intValue) == 1) {
+        if (gMotorControlInstance != nullptr) gMotorControlInstance->setAdaptiveLearnThreshold((uint8_t)constrain(intValue, 1, 100));
+        if (out != nullptr) out->print("OK ADAPT THRESH="); if (out!=nullptr) out->println(intValue);
+        return true;
+    }
+
+    if (sscanf(line.c_str(), "ADAPT GET %d", &intValue) == 1) {
+        if (gMotorControlInstance != nullptr) {
+            int mag = constrain(intValue, 0, 100);
+            int8_t off = gMotorControlInstance->getAdaptiveOffset((uint8_t)mag);
+            if (out != nullptr) {
+                out->print("ADAPT "); out->print(mag); out->print("="); out->println(off);
+            }
+        }
+        return true;
+    }
+
+    if (sscanf(line.c_str(), "ADAPT SET %d %d", &intValue, &intValue) == 2) {
+        // sscanf reuse: read first into intValue then second into intValue would overwrite; parse manually
+    }
+
+    // Manual set using token parsing for two args
+    if (line.startsWith("ADAPT SET ")) {
+        // Extract remainder
+        String rest = line.substring(10);
+        int mag = -1;
+        int off = 0;
+        if (sscanf(rest.c_str(), "%d %d", &mag, &off) == 2) {
+            if (gMotorControlInstance != nullptr && mag >= 0 && mag <= 100) {
+                gMotorControlInstance->setAdaptiveOffset((uint8_t)mag, (int8_t)off);
+                if (out != nullptr) {
+                    out->print("OK ADAPT SET "); out->print(mag); out->print(' '); out->println(off);
+                }
+            }
+            return true;
+        }
+
+        // MPID commands: motor PID control
+        if (line == "MPID SHOW") {
+            if (out != nullptr) {
+                out->println("MPID CONFIG:");
+                if (gMotorControlInstance != nullptr) {
+                    out->print("ADAPT_ENABLED="); out->println(gMotorControlInstance->isAdaptiveEnabled() ? 1 : 0);
+                    out->print("MOTOR_PID_ENABLED="); out->println(gMotorControlInstance->isMotorPidEnabled() ? 1 : 0);
+                    out->print("TARGET_LRPM="); out->println(gMotorControlInstance->getTargetLeftRPM());
+                    out->print("TARGET_RRPM="); out->println(gMotorControlInstance->getTargetRightRPM());
+                    out->print("MEAS_LRPM="); out->println(gMotorControlInstance->getMeasuredLeftRPM());
+                    out->print("MEAS_RRPM="); out->println(gMotorControlInstance->getMeasuredRightRPM());
+                    out->print("GAINS KP,KI,KD="); out->print(gMotorControlInstance->getMotorPidKp(), 6); out->print(','); out->print(gMotorControlInstance->getMotorPidKi(), 6); out->print(','); out->println(gMotorControlInstance->getMotorPidKd(), 6);
+                    out->print("TICKS_PER_REV="); out->println(gMotorControlInstance->getTicksPerRev());
+                } else {
+                    out->println("No MotorControl instance");
+                }
+            }
+            return true;
+        }
+
+        if (line == "MPID ON") {
+            if (gMotorControlInstance != nullptr) gMotorControlInstance->enableMotorPid(true);
+            if (out != nullptr) out->println("OK MPID ON");
+            return true;
+        }
+
+        if (line == "MPID OFF") {
+            if (gMotorControlInstance != nullptr) gMotorControlInstance->enableMotorPid(false);
+            if (out != nullptr) out->println("OK MPID OFF");
+            return true;
+        }
+
+        if (sscanf(line.c_str(), "MPID TARG %f %f", &value, &value) == 2) {
+            // sscanf can't reuse same var; parse manually below
+        }
+
+        if (line.startsWith("MPID TARG ")) {
+            String rest = line.substring(10);
+            float l=0.0f,r=0.0f;
+            if (sscanf(rest.c_str(), "%f %f", &l, &r) == 2) {
+                if (gMotorControlInstance != nullptr) gMotorControlInstance->setTargetRPMs(l, r);
+                if (out != nullptr) { out->print("OK MPID TARG "); out->print(l); out->print(' '); out->println(r); }
+                return true;
+            }
+        }
+
+        if (sscanf(line.c_str(), "MPID GAINS %f %f %f", &value, &value, &value) == 3) {
+            // placeholder to allow branch fallthrough to manual parse
+        }
+
+        if (line.startsWith("MPID GAINS ")) {
+            String rest = line.substring(11);
+            float kp=0, ki=0, kd=0;
+            if (sscanf(rest.c_str(), "%f %f %f", &kp, &ki, &kd) == 3) {
+                if (gMotorControlInstance != nullptr) gMotorControlInstance->setMotorPidGains(kp, ki, kd);
+                if (out != nullptr) { out->print("OK MPID GAINS "); out->print(kp); out->print(' '); out->print(ki); out->print(' '); out->println(kd); }
+                return true;
+            }
+        }
+
+        if (sscanf(line.c_str(), "MPID TICKS %f", &value) == 1) {
+            if (gMotorControlInstance != nullptr) gMotorControlInstance->setTicksPerRev(value);
+            if (out != nullptr) { out->print("OK MPID TICKS="); out->println(value); }
+            return true;
+        }
+        // FLOW commands: control and view optical flow totals and scale
+        if (line == "FLOW SHOW") {
+            if (out != nullptr) {
+                out->println("FLOW CONFIG:");
+                out->print("TOTAL_X_MM="); out->println(opticalFlow.getTotalXmm(), 3);
+                out->print("TOTAL_Y_MM="); out->println(opticalFlow.getTotalYmm(), 3);
+                out->print("MM_PER_COUNT="); out->println(opticalFlow.getScaleMMPerCount(), 6);
+            }
+            return true;
+        }
+
+        if (line == "FLOW RESET") {
+            opticalFlow.resetTotals();
+            if (out != nullptr) out->println("OK FLOW RESET");
+            return true;
+        }
+
+        if (sscanf(line.c_str(), "FLOW SCALE %f", &value) == 1) {
+            opticalFlow.setScaleMMPerCount(value);
+            if (out != nullptr) { out->print("OK FLOW SCALE="); out->println(value); }
+            return true;
+        }
+
+        if (line == "FLOW LED ON") {
+            opticalFlow.setLed(true);
+            if (out != nullptr) out->println("OK FLOW LED ON");
+            return true;
+        }
+
+        if (line == "FLOW LED OFF") {
+            opticalFlow.setLed(false);
+            if (out != nullptr) out->println("OK FLOW LED OFF");
+            return true;
+        }
+    }
+
     printUnknown();
     return false;
 }
@@ -218,6 +416,33 @@ MotorControl::MotorControl(uint8_t leftMotorPin, uint8_t leftEncA, uint8_t leftE
       lastRightEncoderPulses(0),
       lastEncoderSampleMs(0),
       encoderRateInitialized(false) {
+
+    adaptiveCorrectionEnabled = false;
+    adaptiveMaxOffset = 6; // allow up to +/-6 PWM steps correction
+    adaptiveLearnThreshold = 2; // pulses/sec threshold to trigger learning
+    for (int i = 0; i <= 100; ++i) {
+        adaptiveOffset[i] = 0;
+    }
+        // Register this instance for serial command access.
+        gMotorControlInstance = this;
+
+    fixedSamplerEnabled = false;
+    fixedSamplerDtSec = 0.01f;
+    sampledLeftRate = 0.0f;
+    sampledRightRate = 0.0f;
+    // Motor PID defaults
+    motorPidEnabled = false;
+    targetLeftRPM = 0.0f;
+    targetRightRPM = 0.0f;
+    MOTOR_PID_KP = 0.5f;
+    MOTOR_PID_KI = 0.0f;
+    MOTOR_PID_KD = 0.0f;
+    leftPidIntegral = 0.0f;
+    rightPidIntegral = 0.0f;
+    leftPidPrevError = 0.0f;
+    rightPidPrevError = 0.0f;
+    motorPidIntegralLimit = 200.0f; // RPM·s cap to avoid windup
+    ticksPerRev = 2048.0f; // default, change to your encoder CPR*4
 }
 
 float MotorControl::normalizeAngle360(float angleDeg) {
@@ -250,6 +475,152 @@ void MotorControl::begin(void) {
     lastRightEncoderPulses = rightMotor.getEncoderPulses();
     lastEncoderSampleMs = millis();
     encoderRateInitialized = true;
+    // initialize adaptive table on begin
+    for (int i = 0; i <= 100; ++i) {
+        adaptiveOffset[i] = 0;
+    }
+
+    // If fixed sampler enabled, start hardware timer sampling at fixed interval
+    if (fixedSamplerEnabled) {
+        unsigned long us = (unsigned long)(fixedSamplerDtSec * 1e6);
+        if (us < 1000) us = 1000; // at least 1ms
+        gControlTimer.begin([](){
+            if (gMotorControlInstance == nullptr) return;
+            // sample encoder counts and compute pulses/sec
+            static int32_t lastA = 0, lastB = 0;
+            int32_t nowA = gMotorControlInstance->getLeftEncoderPulses();
+            int32_t nowB = gMotorControlInstance->getRightEncoderPulses();
+            int32_t dA = nowA - lastA;
+            int32_t dB = nowB - lastB;
+            lastA = nowA;
+            lastB = nowB;
+            float dt = gMotorControlInstance->fixedSamplerDtSec;
+            if (dt <= 0.0f) dt = 0.01f;
+            gMotorControlInstance->sampledLeftRate = ((float)dA) / dt; // pulses/sec
+            gMotorControlInstance->sampledRightRate = ((float)dB) / dt;
+            gMotorControlInstance->encoderRateInitialized = true;
+            // Motor PID: compute RPM and update motor outputs if enabled
+            if (gMotorControlInstance->motorPidEnabled) {
+                // Convert pulses/sec to RPM: RPM = (pulses/sec) / ticksPerRev * 60
+                float leftRPM = (gMotorControlInstance->sampledLeftRate / gMotorControlInstance->ticksPerRev) * 60.0f;
+                float rightRPM = (gMotorControlInstance->sampledRightRate / gMotorControlInstance->ticksPerRev) * 60.0f;
+
+                // LEFT PID
+                float lError = gMotorControlInstance->targetLeftRPM - leftRPM;
+                gMotorControlInstance->leftPidIntegral += lError * dt;
+                if (gMotorControlInstance->leftPidIntegral > gMotorControlInstance->motorPidIntegralLimit) gMotorControlInstance->leftPidIntegral = gMotorControlInstance->motorPidIntegralLimit;
+                if (gMotorControlInstance->leftPidIntegral < -gMotorControlInstance->motorPidIntegralLimit) gMotorControlInstance->leftPidIntegral = -gMotorControlInstance->motorPidIntegralLimit;
+                float lDeriv = (lError - gMotorControlInstance->leftPidPrevError) / dt;
+                float lOut = (gMotorControlInstance->MOTOR_PID_KP * lError) + (gMotorControlInstance->MOTOR_PID_KI * gMotorControlInstance->leftPidIntegral) + (gMotorControlInstance->MOTOR_PID_KD * lDeriv);
+                gMotorControlInstance->leftPidPrevError = lError;
+
+                // RIGHT PID
+                float rError = gMotorControlInstance->targetRightRPM - rightRPM;
+                gMotorControlInstance->rightPidIntegral += rError * dt;
+                if (gMotorControlInstance->rightPidIntegral > gMotorControlInstance->motorPidIntegralLimit) gMotorControlInstance->rightPidIntegral = gMotorControlInstance->motorPidIntegralLimit;
+                if (gMotorControlInstance->rightPidIntegral < -gMotorControlInstance->motorPidIntegralLimit) gMotorControlInstance->rightPidIntegral = -gMotorControlInstance->motorPidIntegralLimit;
+                float rDeriv = (rError - gMotorControlInstance->rightPidPrevError) / dt;
+                float rOut = (gMotorControlInstance->MOTOR_PID_KP * rError) + (gMotorControlInstance->MOTOR_PID_KI * gMotorControlInstance->rightPidIntegral) + (gMotorControlInstance->MOTOR_PID_KD * rDeriv);
+                gMotorControlInstance->rightPidPrevError = rError;
+
+                // Map PID output (which is in RPM units scaled by gains) to speed command
+                // The PID gains should be tuned so outputs fall in [-100,100]. Clip to safe range.
+                int16_t cmdL = (int16_t)constrain((int)roundf(lOut), -100, 100);
+                int16_t cmdR = (int16_t)constrain((int)roundf(rOut), -100, 100);
+
+                gMotorControlInstance->leftMotor.setSpeed(cmdL);
+                gMotorControlInstance->rightMotor.setSpeed(cmdR);
+            }
+        }, us);
+    }
+}
+
+void MotorControl::enableAdaptiveCorrection(bool enable) {
+    adaptiveCorrectionEnabled = enable;
+}
+
+void MotorControl::enableMotorPid(bool enable) {
+    motorPidEnabled = enable;
+    // Reset integrators when enabling/disabling
+    leftPidIntegral = 0.0f;
+    rightPidIntegral = 0.0f;
+    leftPidPrevError = 0.0f;
+    rightPidPrevError = 0.0f;
+}
+
+void MotorControl::setTargetRPMs(float leftRpm, float rightRpm) {
+    targetLeftRPM = leftRpm;
+    targetRightRPM = rightRpm;
+}
+
+void MotorControl::setMotorPidGains(float kp, float ki, float kd) {
+    MOTOR_PID_KP = kp;
+    MOTOR_PID_KI = ki;
+    MOTOR_PID_KD = kd;
+}
+
+float MotorControl::getMeasuredLeftRPM() const {
+    return (sampledLeftRate / ticksPerRev) * 60.0f;
+}
+
+float MotorControl::getMeasuredRightRPM() const {
+    return (sampledRightRate / ticksPerRev) * 60.0f;
+}
+
+bool MotorControl::isMotorPidEnabled() const {
+    return motorPidEnabled;
+}
+
+float MotorControl::getTargetLeftRPM() const {
+    return targetLeftRPM;
+}
+
+float MotorControl::getTargetRightRPM() const {
+    return targetRightRPM;
+}
+
+void MotorControl::setTicksPerRev(float ticks) {
+    ticksPerRev = ticks;
+}
+
+float MotorControl::getTicksPerRev() const {
+    return ticksPerRev;
+}
+
+float MotorControl::getMotorPidKp() const { return MOTOR_PID_KP; }
+float MotorControl::getMotorPidKi() const { return MOTOR_PID_KI; }
+float MotorControl::getMotorPidKd() const { return MOTOR_PID_KD; }
+
+void MotorControl::resetAdaptiveOffsets(void) {
+    for (int i = 0; i <= 100; ++i) {
+        adaptiveOffset[i] = 0;
+    }
+}
+
+int8_t MotorControl::getAdaptiveOffset(uint8_t magnitude) const {
+    if (magnitude > 100) return 0;
+    return adaptiveOffset[magnitude];
+}
+
+bool MotorControl::isAdaptiveEnabled() const {
+    return adaptiveCorrectionEnabled;
+}
+
+void MotorControl::setAdaptiveMaxOffset(uint8_t maxOff) {
+    if (maxOff == 0) maxOff = 1;
+    if (maxOff > 50) maxOff = 50;
+    adaptiveMaxOffset = (int8_t)maxOff;
+}
+
+void MotorControl::setAdaptiveLearnThreshold(uint8_t thresh) {
+    adaptiveLearnThreshold = (thresh == 0) ? 1 : thresh;
+}
+
+void MotorControl::setAdaptiveOffset(uint8_t magnitude, int8_t offset) {
+    if (magnitude > 100) return;
+    if (offset > adaptiveMaxOffset) offset = adaptiveMaxOffset;
+    if (offset < -adaptiveMaxOffset) offset = -adaptiveMaxOffset;
+    adaptiveOffset[magnitude] = offset;
 }
 
 void MotorControl::setLeft(int16_t speed) {
@@ -308,6 +679,12 @@ bool MotorControl::turnToAngle(float targetAngleDeg,
     if (maxSpeed <= 0) {
         stop();
         return false;
+    }
+
+    // If motor PID is enabled, disable it for the duration of the blocking turn
+    bool prevMotorPid = motorPidEnabled;
+    if (prevMotorPid) {
+        enableMotorPid(false);
     }
 
     while ((millis() - startMs) < timeoutMs) {
@@ -375,6 +752,10 @@ bool MotorControl::turnToAngle(float targetAngleDeg,
     }
 
     stop();
+    // Restore motor PID state
+    if (prevMotorPid) {
+        enableMotorPid(true);
+    }
     return false;
 }
 
@@ -416,25 +797,41 @@ void MotorControl::applyStraightSpeedSync(int16_t& leftSpeed, int16_t& rightSpee
         return;
     }
 
-    unsigned long dtMs = now - syncLastMs;
-    if (dtMs == 0) {
-        return;
+    // Prefer fixed-rate sampled rates when the fixed sampler is enabled and initialized
+    float leftRate = 0.0f;
+    float rightRate = 0.0f;
+    float dt = 0.0f;
+#if defined(__IMXRT1062__)
+    if (fixedSamplerEnabled && encoderRateInitialized) {
+        leftRate = sampledLeftRate;   // pulses/sec
+        rightRate = sampledRightRate; // pulses/sec
+        dt = fixedSamplerDtSec;
+        // update stored last counters to avoid confusing legacy path
+        syncLastLeftEncoderPulses = leftNow;
+        syncLastRightEncoderPulses = rightNow;
+        syncLastMs = now;
+    } else
+#endif
+    {
+        unsigned long dtMs = now - syncLastMs;
+        if (dtMs == 0) {
+            return;
+        }
+
+        int32_t dLeft = leftNow - syncLastLeftEncoderPulses;
+        int32_t dRight = rightNow - syncLastRightEncoderPulses;
+
+        syncLastLeftEncoderPulses = leftNow;
+        syncLastRightEncoderPulses = rightNow;
+        syncLastMs = now;
+
+        // Calculate mismatch (error) in pulses/sec
+        leftRate = ((float)abs(dLeft) * 1000.0f) / (float)dtMs;
+        rightRate = ((float)abs(dRight) * 1000.0f) / (float)dtMs;
+        dt = (float)dtMs / 1000.0f;
     }
 
-    int32_t dLeft = leftNow - syncLastLeftEncoderPulses;
-    int32_t dRight = rightNow - syncLastRightEncoderPulses;
-
-    syncLastLeftEncoderPulses = leftNow;
-    syncLastRightEncoderPulses = rightNow;
-    syncLastMs = now;
-
-    // Calculate mismatch (error) in pulses/sec
-    float leftRate = ((float)abs(dLeft) * 1000.0f) / (float)dtMs;
-    float rightRate = ((float)abs(dRight) * 1000.0f) / (float)dtMs;
     float error = leftRate - rightRate;
-
-    // PID calculation
-    float dt = (float)dtMs / 1000.0f;
 
     // Proportional term
     float pTerm = STRAIGHT_SYNC_KP * error;
@@ -464,4 +861,30 @@ void MotorControl::applyStraightSpeedSync(int16_t& leftSpeed, int16_t& rightSpee
 
     leftSpeed = (int16_t)constrain((int)l, -100, 100);
     rightSpeed = (int16_t)constrain((int)r, -100, 100);
+
+    // Adaptive learning: update per-magnitude offset table when enabled.
+    if (adaptiveCorrectionEnabled) {
+        int mag = abs(lastCmdLeftSpeed);
+        if (mag >= 0 && mag <= 100) {
+            // Only learn when the rate mismatch is meaningful
+            if (fabs(error) >= (float)adaptiveLearnThreshold) {
+                // If left is faster than right, decrement left offset (make left command smaller)
+                int8_t delta = (error > 0.0f) ? -1 : 1;
+                int newOff = (int)adaptiveOffset[mag] + (int)delta;
+                if (newOff > adaptiveMaxOffset) newOff = adaptiveMaxOffset;
+                if (newOff < -adaptiveMaxOffset) newOff = -adaptiveMaxOffset;
+                adaptiveOffset[mag] = (int8_t)newOff;
+            }
+
+            // Apply learned offset respecting drive direction
+            int sign = (lastCmdLeftSpeed >= 0) ? 1 : -1;
+            int adj = (int)adaptiveOffset[mag] * sign;
+            leftSpeed = (int16_t)constrain((int)leftSpeed + adj, -100, 100);
+        }
+    }
+}
+
+void MotorControl::enableFixedRateSampler(bool enable, float dtSeconds) {
+    fixedSamplerEnabled = enable;
+    if (dtSeconds > 0.0f) fixedSamplerDtSec = dtSeconds;
 }
