@@ -7,19 +7,12 @@
 #include "dc_motor.h"
 #include "Arduino.h"
 
-DCMotor* DCMotor::instances[2] = {nullptr, nullptr};
+#if defined(__IMXRT1062__)
+// Teensy 4 QuadEncoder uses read()/setInitConfig()/init()
+#include <QuadEncoder.h>
+#endif
 
-void DCMotor::encoderISR0() {
-    if (instances[0] != nullptr) {
-        instances[0]->handleEncoderInterrupt();
-    }
-}
-
-void DCMotor::encoderISR1() {
-    if (instances[1] != nullptr) {
-        instances[1]->handleEncoderInterrupt();
-    }
-}
+// Teensy-only build: no legacy attachInterrupt-based encoder handling.
 
 /**
  * Constructor - Initialize DC motor with pin number and encoder pins
@@ -28,21 +21,13 @@ void DCMotor::encoderISR1() {
  * @param enc_pin_b: Encoder B pin
  */
 DCMotor::DCMotor(uint8_t motor_pin, uint8_t enc_pin_a, uint8_t enc_pin_b)
-    : pin(motor_pin),
-      current_speed(0),
-      encoderPinA(enc_pin_a),
-      encoderPinB(enc_pin_b),
-      encoderPulses(0),
-      directionForward(true),
-      encoderPinALast(LOW),
-      encoderConfigured(false),
-      motorIndex(255) {
+        : pin(motor_pin),
+            current_speed(0),
+            encoderPinA(enc_pin_a),
+            encoderPinB(enc_pin_b),
+            hwEncoder(nullptr) {
 
-    // Assign motor index using a static counter (first instance = 0, second = 1)
-    static uint8_t nextIndex = 0;
-    if (nextIndex < 2) {
-        motorIndex = nextIndex++;
-    }
+    // Constructor keeps simple for Teensy hardware encoder usage
 }
 
 /**
@@ -52,73 +37,17 @@ void DCMotor::begin(void) {
     Serial.begin(115200);
     servo.attach(pin);
     stop();  // Set to neutral (1500µs)
-
-    if (motorIndex < 2) {
-        pinMode(encoderPinA, INPUT);
-        pinMode(encoderPinB, INPUT);
-        encoderPinALast = digitalRead(encoderPinA);
-        directionForward = true;
-        encoderPulses = 0;
-
-        instances[motorIndex] = this;
-        int interruptNumber = digitalPinToInterrupt(encoderPinA);
-        Serial.print("Encoder A pin: ");
-        Serial.print(encoderPinA);
-        Serial.print(" -> interruptNumber: ");
-        Serial.print(interruptNumber);
-        Serial.print(" motorIndex: ");
-        Serial.println(motorIndex);
-        if (interruptNumber != NOT_AN_INTERRUPT) {
-            if (motorIndex == 0) {
-                attachInterrupt(interruptNumber, DCMotor::encoderISR0, CHANGE);
-            } else {
-                attachInterrupt(interruptNumber, DCMotor::encoderISR1, CHANGE);
-            }
-            encoderConfigured = true;
-            Serial.println("attachInterrupt called OK");
-        } else {
-            Serial.println("ERROR: NOT_AN_INTERRUPT returned for encoder pin");
-        }
+    // Initialize hardware QuadEncoder for Teensy 4
+    // Note: Teensy 4.0 requires valid hardware pin pairs for QuadTimer channels.
+    if (hwEncoder == nullptr) {
+        hwEncoder = new QuadEncoder(0, encoderPinA, encoderPinB, 0);
+        hwEncoder->setInitConfig();
+        hwEncoder->init();
     }
-
-    Serial.print("DC Motor initialized on pin: ");
+    Serial.print("DC Motor initialized (Teensy QuadEncoder) on pin: ");
     Serial.println(pin);
-    if (encoderConfigured) {
-        Serial.print("Encoder initialized A/B pins: ");
-        Serial.print(encoderPinA);
-        Serial.print("/");
-        Serial.print(encoderPinB);
-        Serial.print(" (motorIndex=");
-        Serial.print(motorIndex);
-        Serial.println(")");
-        // DEBUG: Test if pins are readable
-        Serial.print("Initial pin states: A=");
-        Serial.print(digitalRead(encoderPinA));
-        Serial.print(" B=");
-        Serial.println(digitalRead(encoderPinB));
-    } else {
-        Serial.println("WARNING: Encoder not configured for this motor");
-    }
 }
-
-void DCMotor::handleEncoderInterrupt() {
-    int stateA = digitalRead(encoderPinA);
-    if ((encoderPinALast == LOW) && (stateA == HIGH)) {
-        int stateB = digitalRead(encoderPinB);
-        if ((stateB == LOW) && directionForward) {
-            directionForward = false; // Reverse
-        } else if ((stateB == HIGH) && !directionForward) {
-            directionForward = true;  // Forward
-        }
-    }
-    encoderPinALast = (uint8_t)stateA;
-
-    if (!directionForward) {
-        encoderPulses++;
-    } else {
-        encoderPulses--;
-    }
-}
+// No legacy ISR handler on Teensy; QuadEncoder provides hardware counting.
 
 /**
  * Set motor speed
@@ -140,11 +69,12 @@ void DCMotor::setSpeed(int16_t speed) {
     
     current_speed = speed;
     
-    // Convert speed (-100 to 100) to pulse width (1000 to 2000 µs)
+    // Convert speed (-100 to 100) to pulse width (1050 to 1950 µs)
     // Speed 0 = 1500µs (neutral/stop)
-    // Speed -100 = 1000µs (full reverse)
-    // Speed 100 = 2000µs (full forward)
-    uint16_t pulse_width = NEUTRAL_PULSE + (speed * 5);  // Each speed unit = 5µs
+    // Speed -100 = 1050µs (full reverse)
+    // Speed 100 = 1950µs (full forward)
+    uint16_t pulse_width = (uint16_t)map((long)speed, (long)MIN_SPEED, (long)MAX_SPEED,
+                                         (long)MIN_PULSE, (long)MAX_PULSE);
     
     servo.writeMicroseconds(pulse_width);
     
@@ -182,16 +112,16 @@ bool DCMotor::isValidSpeed(int16_t speed) const {
 }
 
 int32_t DCMotor::getEncoderPulses(void) const {
-    noInterrupts();
-    int32_t count = encoderPulses;
-    interrupts();
-    return count;
+    if (hwEncoder != nullptr) {
+        return hwEncoder->read();
+    }
+    return 0;
 }
 
 void DCMotor::resetEncoderPulses(void) {
-    noInterrupts();
-    encoderPulses = 0;
-    interrupts();
+    if (hwEncoder != nullptr) {
+        hwEncoder->write(0);
+    }
 }
 
 /**
@@ -202,6 +132,5 @@ void DCMotor::printStatus(void) const {
     Serial.print(current_speed);
     Serial.print(" [-100 to 100], Encoder pulses: ");
     Serial.print(getEncoderPulses());
-    Serial.print(", Direction: ");
-    Serial.println(directionForward ? "Forward" : "Reverse");
+    Serial.println();
 }

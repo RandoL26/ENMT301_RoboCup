@@ -114,7 +114,9 @@ char CH9143Bluetooth::read() {
 // Flush the receive buffer
 void CH9143Bluetooth::flush() {
     if (initialized && serial != nullptr) {
-        serial->flush();
+        while (serial->available()) {
+            serial->read();
+        }
     }
 }
 
