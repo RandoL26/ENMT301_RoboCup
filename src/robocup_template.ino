@@ -18,6 +18,7 @@
 #include <Wire.h>                   //for I2C and SPI
 #include <TaskScheduler.h>          //scheduler
 #include <VL53L1X.h>                //VL53L1X distance sensor
+#include <VL53L0X.h>                //VL53L0X distance sensor for top target validation
 #include <stdarg.h>                 //for va_list in printf functions
 #include <stdio.h>                  //for vsnprintf
 #include <string.h>                 //for strcmp/sscanf parsing
@@ -35,6 +36,7 @@
 #include "ir_xy_position.h"         //IR XY position sensor
 #include "ir_distance_sensor.h"     //2Y0A02 IR distance sensor
 #include "tof_sensor_array.h"       //TOF (VL53L1X) sensor array
+#include "target_detector.h"        //Tier-based target / obstacle detection
 #include "TOF_X8.h"                 // DFRobot Matrix Lidar 8x8 (TOF_X8)
 #include "dc_motor.h"               //DC motor control 
 #include "motor_control.h"          //PID/SYNC command handling
@@ -105,8 +107,9 @@
 #define IR_DISTANCE_SENSOR_PIN    A9  // Analog pin for 2Y0A02 IR distance sensor
 
 // VL53L1X sensor configuration
-const uint8_t VL53L1X_SENSOR_COUNT = 4;  // Update this if you add more sensors
+const uint8_t VL53L1X_SENSOR_COUNT = 4;  // 4 tier sensors
 const uint8_t VL53L1X_XSHUT_PINS[VL53L1X_SENSOR_COUNT] = { 0, 1, 2, 3 };  // Update this with the XSHUT pins for each sensor
+#define VL53L0X_TOP_XSHUT_PIN 6   // Digital pin used to control the top VL53L0X sensor XSHUT
 
 // DC Motor PIN definitions
 #define DC_M1_PIN 0              //PWM pin for DC motor control (can be extended to 2 motors)
@@ -169,6 +172,9 @@ IRDistanceSensor irDistanceSensor(IR_DISTANCE_SENSOR_PIN);
 
 // TOF Sensor Array instance (explicit SX1509 I2C address 0x3F)
 TOFSensorArray tofSensorArray(VL53L1X_SENSOR_COUNT, 0x3F);
+VL53L0X topTofSensor;
+bool topTofSensorInitialized = false;
+TieredTargetDetector targetDetector(tofSensorArray, 0, 1, 2, 3);
 
 // CH9143 Bluetooth instance
 CH9143Bluetooth bluetooth(&Serial7, BLUETOOTH_RX_PIN, BLUETOOTH_TX_PIN, BLUETOOTH_BAUD);
@@ -259,6 +265,27 @@ void vl53l1x_sensor_callback(void) {
                 Serial.print(tofData.distances[i]);
             }
             if (i < tofData.sensorCount - 1) Serial.print("\t");
+        }
+
+        uint16_t topDistance = 0xFFFF;
+        if (topTofSensorInitialized) {
+            topDistance = topTofSensor.readRangeContinuousMillimeters();
+            Serial.print("\tTop:");
+            Serial.print(topDistance);
+        }
+
+        if (targetDetector.update(topDistance)) {
+            TierDetectionResult result = targetDetector.getDetectionResult();
+            if (result != TierDetectionResult::None) {
+                targetDetector.debugPrint();
+                if (result == TierDetectionResult::Target) {
+                    Serial.println("Tier detector: TARGET confirmed");
+                } else if (result == TierDetectionResult::Obstacle) {
+                    Serial.println("Tier detector: OBSTACLE confirmed");
+                } else {
+                    Serial.println("Tier detector: INDETERMINATE");
+                }
+            }
         }
 
         // If the DFRobot Matrix Lidar (8x8) is present, print it as 8 rows
@@ -760,6 +787,30 @@ void robot_init() {
         tofSensorArray.setDistanceOffset(0, 0);   // Sensor 0 offset
         tofSensorArray.setDistanceOffset(1, -40); // Sensor 1 offset
         tofSensorArray.setDistanceOffset(2, 0);  // Sensor 2 offset
+        tofSensorArray.setDistanceOffset(3, 0);  // Sensor 3 offset
+
+        pinMode(VL53L0X_TOP_XSHUT_PIN, OUTPUT);
+        digitalWrite(VL53L0X_TOP_XSHUT_PIN, LOW);
+        delay(10);
+        digitalWrite(VL53L0X_TOP_XSHUT_PIN, HIGH);
+        delay(10);
+
+        topTofSensor.setTimeout(500);
+        if (!topTofSensor.init()) {
+            printlnBoth("WARNING: Failed to initialize top VL53L0X sensor");
+        } else {
+            topTofSensor.startContinuous(50);
+            topTofSensorInitialized = true;
+            printlnBoth("Top VL53L0X sensor initialized successfully");
+        }
+
+        TieredTargetDetectorConfig targetConfig;
+        targetConfig.nearIntersectMm = 300;
+        targetConfig.farIntersectMm = 500;
+        targetConfig.intersectionToleranceMm = 35;
+        targetConfig.topSensorClearanceMm = 80;
+        targetConfig.topSensorRejectMarginMm = 40;
+        targetDetector.setConfig(targetConfig);
     }
 
     // Initialize optional DFRobot Matrix Lidar (8x8 matrix) if connected
