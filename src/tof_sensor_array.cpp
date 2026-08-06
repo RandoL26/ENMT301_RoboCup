@@ -75,13 +75,15 @@ bool TOFSensorArray::begin() {
         
         // Stop driving this sensor's XSHUT low (bring sensor out of reset)
         ioExpander->digitalWrite(xshutPins[i], HIGH);
-        delay(10);
+        delay(50);
 
         // Initialize sensor
         sensors[i].setTimeout(500);
         if (!sensors[i].init()) {
             Serial.print("Failed to detect and initialize sensor ");
-            Serial.println(i);
+            Serial.print(i);
+            Serial.print(" on expander pin ");
+            Serial.println(xshutPins[i]);
             return false;
         }
         // Set unique I2C address for each sensor

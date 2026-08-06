@@ -109,7 +109,7 @@
 // VL53L1X sensor configuration
 const uint8_t VL53L1X_SENSOR_COUNT = 4;  // 4 tier sensors
 const uint8_t VL53L1X_XSHUT_PINS[VL53L1X_SENSOR_COUNT] = { 0, 1, 2, 3 };  // Update this with the XSHUT pins for each sensor
-#define VL53L0X_TOP_XSHUT_PIN 6   // Digital pin used to control the top VL53L0X sensor XSHUT
+#define VL53L0X_TOP_XSHUT_PIN 5   // Digital pin used to control the top VL53L0X sensor XSHUT
 
 // DC Motor PIN definitions
 #define DC_M1_PIN 0              //PWM pin for DC motor control (can be extended to 2 motors)
@@ -194,6 +194,7 @@ static const int16_t MOTOR_SLEW_STEP = 8;
 void process_bluetooth_motor_commands(void);
 void process_usb_motor_commands(void);
 void handle_motor_line(const char* line, Print* ackPort);
+bool handle_sensor_line(const char* line, Print* ackPort);
 int16_t slew_toward(int16_t current, int16_t target, int16_t step);
 
 // Task wrapper for proximity sensor reading
@@ -250,71 +251,85 @@ void optical_flow_callback(void) {
 
 // Task wrapper for VL53L1X sensor reading
 void vl53l1x_sensor_callback(void) {
-    if (tofSensorArray.isInitialized()) {
-        TOFSensorArray::TOFData tofData = tofSensorArray.readDistances();
-
-        // Print VL53L1X distances inline
-        Serial.print("\t");
-        for (uint8_t i = 0; i < tofData.sensorCount; i++) {
-            Serial.print("S");
-            Serial.print(i);
-            Serial.print(":");
-            if (tofData.distances[i] == 0xFFFF) {
-                Serial.print("TIMEOUT");
-            } else {
-                Serial.print(tofData.distances[i]);
-            }
-            if (i < tofData.sensorCount - 1) Serial.print("\t");
+    if (!tofSensorArray.isInitialized()) {
+        static bool warned = false;
+        if (!warned) {
+            Serial.println("WARNING: VL53L1X sensor array not initialized, no S0-S3 data available");
+            warned = true;
         }
+        return;
+    }
 
-        uint16_t topDistance = 0xFFFF;
-        if (topTofSensorInitialized) {
-            topDistance = topTofSensor.readRangeContinuousMillimeters();
-            Serial.print("\tTop:");
+    TOFSensorArray::TOFData tofData = tofSensorArray.readDistances();
+
+    // Print VL53L1X distances inline
+    Serial.print("\t");
+    for (uint8_t i = 0; i < tofData.sensorCount; i++) {
+        Serial.print("S");
+        Serial.print(i);
+        Serial.print(":");
+        if (tofData.distances[i] == 0xFFFF) {
+            Serial.print("TIMEOUT");
+        } else {
+            Serial.print(tofData.distances[i]);
+        }
+        if (i < tofData.sensorCount - 1) Serial.print("\t");
+    }
+
+    uint16_t topDistance = 0xFFFF;
+    if (topTofSensorInitialized) {
+        topDistance = topTofSensor.readRangeContinuousMillimeters();
+        Serial.print("\tS5:");
+        if (topDistance == 0xFFFF) {
+            Serial.print("TIMEOUT");
+        } else {
             Serial.print(topDistance);
         }
+    } else {
+        Serial.print("\tS5:NOTINIT");
+    }
 
-        if (targetDetector.update(topDistance)) {
-            TierDetectionResult result = targetDetector.getDetectionResult();
-            if (result != TierDetectionResult::None) {
-                targetDetector.debugPrint();
-                if (result == TierDetectionResult::Target) {
-                    Serial.println("Tier detector: TARGET confirmed");
-                } else if (result == TierDetectionResult::Obstacle) {
-                    Serial.println("Tier detector: OBSTACLE confirmed");
-                } else {
-                    Serial.println("Tier detector: INDETERMINATE");
-                }
-            }
-        }
-
-        // If the DFRobot Matrix Lidar (8x8) is present, print it as 8 rows
-        if (TOF_X8_isInitialized()) {
-            uint16_t x8buf[64];
-            if (TOF_X8_readAll(x8buf, 64)) {
-                // Print each row on its own line, prefixed with a tab for alignment
-                Serial.print('\n');
-                Serial.print('\n');
-                for (uint8_t y = 0; y < 8; y++) {
-                    Serial.print('\t');
-                    Serial.print("Y");
-                    Serial.print(y);
-                    Serial.print(": ");
-                    for (uint8_t x = 0; x < 8; x++) {
-                        Serial.print(x8buf[y * 8 + x]);
-                        if (x < 7) Serial.print(",");
-                    }
-                    Serial.println();
-                }
-                Serial.print('\n');
+    if (targetDetector.update(topDistance)) {
+        TierDetectionResult result = targetDetector.getDetectionResult();
+        if (result != TierDetectionResult::None) {
+            targetDetector.debugPrint();
+            if (result == TierDetectionResult::Target) {
+                Serial.println("Tier detector: TARGET confirmed");
+            } else if (result == TierDetectionResult::Obstacle) {
+                Serial.println("Tier detector: OBSTACLE confirmed");
             } else {
-                Serial.println('\t',"X8:ERR");
+                Serial.println("Tier detector: INDETERMINATE");
             }
-        } else {
-            // No X8 initialization; print explicit marker so absence is visible
-            Serial.print('\t');
-            Serial.println("X8:NOTINIT");
         }
+    }
+
+    // If the DFRobot Matrix Lidar (8x8) is present, print it as 8 rows
+    if (TOF_X8_isInitialized()) {
+        uint16_t x8buf[64];
+        if (TOF_X8_readAll(x8buf, 64)) {
+            // Print each row on its own line, prefixed with a tab for alignment
+            Serial.print('\n');
+            Serial.print('\n');
+            for (uint8_t y = 0; y < 8; y++) {
+                Serial.print('\t');
+                Serial.print("Y");
+                Serial.print(y);
+                Serial.print(": ");
+                for (uint8_t x = 0; x < 8; x++) {
+                    Serial.print(x8buf[y * 8 + x]);
+                    if (x < 7) Serial.print(",");
+                }
+                Serial.println();
+            }
+            Serial.print('\n');
+        } else {
+            Serial.print('\t');
+            Serial.println("X8:ERR");
+        }
+    } else {
+        // No X8 initialization; print explicit marker so absence is visible
+        Serial.print('\t');
+        Serial.println("X8:NOTINIT");
     }
 }
 
@@ -407,7 +422,9 @@ void process_bluetooth_motor_commands(void) {
         if (c == '\n') {
             lineBuffer[idx] = '\0';
             if (idx > 0) {
-                handle_motor_line(lineBuffer, bluetooth.isInitialized() ? (Print*)&Serial7 : nullptr);
+                if (!handle_sensor_line(lineBuffer, bluetooth.isInitialized() ? (Print*)&Serial7 : nullptr)) {
+                    handle_motor_line(lineBuffer, bluetooth.isInitialized() ? (Print*)&Serial7 : nullptr);
+                }
             }
             idx = 0;
             continue;
@@ -437,7 +454,9 @@ void process_usb_motor_commands(void) {
         if (c == '\n') {
             lineBuffer[idx] = '\0';
             if (idx > 0) {
-                handle_motor_line(lineBuffer, &Serial);
+                if (!handle_sensor_line(lineBuffer, &Serial)) {
+                    handle_motor_line(lineBuffer, &Serial);
+                }
             }
             idx = 0;
             continue;
@@ -562,6 +581,38 @@ void handle_motor_line(const char* line, Print* ackPort) {
     }
 }
 
+bool handle_sensor_line(const char* line, Print* ackPort) {
+    // Convert input line to uppercase for case-insensitive command matching
+    char upperLine[64];
+    strncpy(upperLine, line, sizeof(upperLine) - 1);
+    upperLine[sizeof(upperLine) - 1] = '\0';
+    for (int i = 0; upperLine[i] != '\0'; i++) {
+        upperLine[i] = toupper((unsigned char)upperLine[i]);
+    }
+
+    if (strcmp(upperLine, "SENSOR DEBUG") == 0) {
+        if (ackPort != nullptr) {
+            ackPort->println("SENSOR DEBUG:");
+            targetDetector.debugPrint();
+        } else {
+            Serial.println("SENSOR DEBUG:");
+            targetDetector.debugPrint();
+        }
+        return true;
+    }
+
+    if (strncmp(upperLine, "SENSOR", 6) == 0) {
+        if (ackPort != nullptr) {
+            ackPort->println("ERR Unknown sensor command");
+        } else {
+            Serial.println("ERR Unknown sensor command");
+        }
+        return true;
+    }
+
+    return false;
+}
+
 // Herkulex continuous test callback: toggles between -100 and 100 degrees
 void herkulex_test_callback() {
     static bool toggle = false;
@@ -669,11 +720,11 @@ void setup() {
   delay(2000);  // Give USB serial time to stabilize
   Serial.println("\n\n=== RoboCup Robot Starting ===");
   
-  // CH9143 two-chip bridge architecture:
-  //   PC (USB-C) --> CH9143 [USB chip]  ~~~BLE~~~  CH9143 [UART chip] --> Serial7 --> Teensy
-  // The UART chip communicates at 115200 (CH9143 factory default).
-  // No Bluetooth pairing needed on the PC \u2014 it connects via USB-C to the USB chip.
-    // Serial7 is initialized by bluetooth.begin() during robot_init().
+// CH9143 two-chip bridge architecture:
+//   PC (USB-C) --> CH9143 [USB chip]  ~~~BLE~~~  CH9143 [UART chip] --> Serial7 --> Teensy
+// The UART chip communicates at 115200 (CH9143 factory default).
+// No Bluetooth pairing needed on the PC \u2014 it connects via USB-C to the USB chip.
+// Serial7 is initialized by bluetooth.begin() during robot_init().
   
   Wire.begin();        // MUST be called FIRST - before any I2C operations
   pin_init();
@@ -779,8 +830,8 @@ void robot_init() {
     // Set XSHUT pins for each sensor
     tofSensorArray.setXSHUTPins(VL53L1X_XSHUT_PINS, VL53L1X_SENSOR_COUNT);
     
-    // Initialize the TOF sensor array
-    if (!tofSensorArray.begin()) {
+    bool tofArrayOk = tofSensorArray.begin();
+    if (!tofArrayOk) {
         printlnBoth("WARNING: Failed to initialize TOF sensor array");
     } else {
         printlnBoth("TOF sensor array initialized successfully");
@@ -788,30 +839,30 @@ void robot_init() {
         tofSensorArray.setDistanceOffset(1, -40); // Sensor 1 offset
         tofSensorArray.setDistanceOffset(2, 0);  // Sensor 2 offset
         tofSensorArray.setDistanceOffset(3, 0);  // Sensor 3 offset
-
-        pinMode(VL53L0X_TOP_XSHUT_PIN, OUTPUT);
-        digitalWrite(VL53L0X_TOP_XSHUT_PIN, LOW);
-        delay(10);
-        digitalWrite(VL53L0X_TOP_XSHUT_PIN, HIGH);
-        delay(10);
-
-        topTofSensor.setTimeout(500);
-        if (!topTofSensor.init()) {
-            printlnBoth("WARNING: Failed to initialize top VL53L0X sensor");
-        } else {
-            topTofSensor.startContinuous(50);
-            topTofSensorInitialized = true;
-            printlnBoth("Top VL53L0X sensor initialized successfully");
-        }
-
-        TieredTargetDetectorConfig targetConfig;
-        targetConfig.nearIntersectMm = 300;
-        targetConfig.farIntersectMm = 500;
-        targetConfig.intersectionToleranceMm = 35;
-        targetConfig.topSensorClearanceMm = 80;
-        targetConfig.topSensorRejectMarginMm = 40;
-        targetDetector.setConfig(targetConfig);
     }
+
+    pinMode(VL53L0X_TOP_XSHUT_PIN, OUTPUT);
+    digitalWrite(VL53L0X_TOP_XSHUT_PIN, LOW);
+    delay(10);
+    digitalWrite(VL53L0X_TOP_XSHUT_PIN, HIGH);
+    delay(50);
+
+    topTofSensor.setTimeout(500);
+    if (!topTofSensor.init()) {
+        printlnBoth("WARNING: Failed to initialize top VL53L0X sensor");
+    } else {
+        topTofSensor.startContinuous(50);
+        topTofSensorInitialized = true;
+        printlnBoth("Top VL53L0X sensor initialized successfully");
+    }
+
+    TieredTargetDetectorConfig targetConfig;
+    targetConfig.nearIntersectMm = 300;
+    targetConfig.farIntersectMm = 500;
+    targetConfig.intersectionToleranceMm = 35;
+    targetConfig.topSensorClearanceMm = 80;
+    targetConfig.topSensorRejectMarginMm = 40;
+    targetDetector.setConfig(targetConfig);
 
     // Initialize optional DFRobot Matrix Lidar (8x8 matrix) if connected
     printlnBoth("Initialising DFRobot Matrix Lidar (TOF_X8)...");
