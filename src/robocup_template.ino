@@ -107,9 +107,10 @@
 #define IR_DISTANCE_SENSOR_PIN    A9  // Analog pin for 2Y0A02 IR distance sensor
 
 // VL53L1X sensor configuration
-const uint8_t VL53L1X_SENSOR_COUNT = 4;  // 4 tier sensors
-const uint8_t VL53L1X_XSHUT_PINS[VL53L1X_SENSOR_COUNT] = { 0, 1, 2, 3 };  // Update this with the XSHUT pins for each sensor
-#define VL53L0X_TOP_XSHUT_PIN 5   // Digital pin used to control the top VL53L0X sensor XSHUT
+const uint8_t VL53L1X_SENSOR_COUNT = 5;  // 5 tier sensors
+const uint8_t VL53L1X_XSHUT_PINS[VL53L1X_SENSOR_COUNT] = { 0, 1, 2, 3, 4};  // Update this with the XSHUT pins for each sensor
+const uint8_t VL53L0X_TOP_XSHUT_EXPANDER_PIN = 4;  // SX1509 expander pin 4 for top VL53L0X sensor XSHUT
+#define VL53L0X_TOP_XSHUT_PIN 6   // Legacy: kept for reference (actual XSHUT is on expander pin 4)
 
 // DC Motor PIN definitions
 #define DC_M1_PIN 0              //PWM pin for DC motor control (can be extended to 2 motors)
@@ -172,8 +173,6 @@ IRDistanceSensor irDistanceSensor(IR_DISTANCE_SENSOR_PIN);
 
 // TOF Sensor Array instance (explicit SX1509 I2C address 0x3F)
 TOFSensorArray tofSensorArray(VL53L1X_SENSOR_COUNT, 0x3F);
-VL53L0X topTofSensor;
-bool topTofSensorInitialized = false;
 TieredTargetDetector targetDetector(tofSensorArray, 0, 1, 2, 3);
 
 // CH9143 Bluetooth instance
@@ -277,31 +276,19 @@ void vl53l1x_sensor_callback(void) {
     }
 
     uint16_t topDistance = 0xFFFF;
-    if (topTofSensorInitialized) {
-        topDistance = topTofSensor.readRangeContinuousMillimeters();
+    if (!tofSensorArray.isTopSensorInArray() && tofSensorArray.isTopSensorInitialized()) {
+        topDistance = tofSensorArray.readTopSensorDistance();
         Serial.print("\tS5:");
         if (topDistance == 0xFFFF) {
             Serial.print("TIMEOUT");
         } else {
             Serial.print(topDistance);
         }
-    } else {
+    } else if (!tofSensorArray.isTopSensorInArray()) {
         Serial.print("\tS5:NOTINIT");
     }
 
-    if (targetDetector.update(topDistance)) {
-        TierDetectionResult result = targetDetector.getDetectionResult();
-        if (result != TierDetectionResult::None) {
-            targetDetector.debugPrint();
-            if (result == TierDetectionResult::Target) {
-                Serial.println("Tier detector: TARGET confirmed");
-            } else if (result == TierDetectionResult::Obstacle) {
-                Serial.println("Tier detector: OBSTACLE confirmed");
-            } else {
-                Serial.println("Tier detector: INDETERMINATE");
-            }
-        }
-    }
+    targetDetector.update(topDistance);
 
     // If the DFRobot Matrix Lidar (8x8) is present, print it as 8 rows
     if (TOF_X8_isInitialized()) {
@@ -824,36 +811,39 @@ void robot_init() {
     printlnBoth("Initialising IR Distance Sensor (2Y0A02)...");
     irDistanceSensor.begin();
     
-    printlnBoth("Initialising TOF (VL53L1X) Sensor Array...");
+    printlnBoth("Initialising TOF Sensors...");
     Wire.setClock(400000); // use 400 kHz I2C
-    
-    // Set XSHUT pins for each sensor
+
+    // Initialize VL53L1X sensor array.
+    // The top VL53L0X will be held in reset via the expander until after array init completes.
+    printlnBoth("Initialising VL53L1X Sensor Array...");
     tofSensorArray.setXSHUTPins(VL53L1X_XSHUT_PINS, VL53L1X_SENSOR_COUNT);
+    tofSensorArray.setTopSensorXshutPin(VL53L0X_TOP_XSHUT_EXPANDER_PIN);
     
     bool tofArrayOk = tofSensorArray.begin();
     if (!tofArrayOk) {
         printlnBoth("WARNING: Failed to initialize TOF sensor array");
+        printlnBoth("Running TOF XSHUT diagnostic for each sensor...");
+        for (uint8_t i = 0; i < VL53L1X_SENSOR_COUNT; i++) {
+            Serial.print("--- Diagnostic for TOF sensor index ");
+            Serial.println(i);
+            tofSensorArray.diagnoseSensorByIndex(i);
+            delay(500);
+        }
     } else {
-        printlnBoth("TOF sensor array initialized successfully");
+        printlnBoth("VL53L1X sensor array initialized successfully");
         tofSensorArray.setDistanceOffset(0, 0);   // Sensor 0 offset
-        tofSensorArray.setDistanceOffset(1, -40); // Sensor 1 offset
-        tofSensorArray.setDistanceOffset(2, 0);  // Sensor 2 offset
+        tofSensorArray.setDistanceOffset(1, 0); // Sensor 1 offset
+        tofSensorArray.setDistanceOffset(2, -40);  // Sensor 2 offset
         tofSensorArray.setDistanceOffset(3, 0);  // Sensor 3 offset
+        tofSensorArray.setDistanceOffset(4, 0);  // Sensor 4 offset
     }
 
-    pinMode(VL53L0X_TOP_XSHUT_PIN, OUTPUT);
-    digitalWrite(VL53L0X_TOP_XSHUT_PIN, LOW);
-    delay(10);
-    digitalWrite(VL53L0X_TOP_XSHUT_PIN, HIGH);
-    delay(50);
-
-    topTofSensor.setTimeout(500);
-    if (!topTofSensor.init()) {
+    // Initialize top VL53L0X sensor using the integrated TOFSensorArray method
+    printlnBoth("Initialising top VL53L0X sensor on expander pin 4...");
+    tofSensorArray.setTopSensorXshutPin(VL53L0X_TOP_XSHUT_EXPANDER_PIN);
+    if (!tofSensorArray.initializeTopSensor()) {
         printlnBoth("WARNING: Failed to initialize top VL53L0X sensor");
-    } else {
-        topTofSensor.startContinuous(50);
-        topTofSensorInitialized = true;
-        printlnBoth("Top VL53L0X sensor initialized successfully");
     }
 
     TieredTargetDetectorConfig targetConfig;
