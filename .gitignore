@@ -1,4 +1,4 @@
 .pio
 .venv
-~$*.sldprt
-~$*.sldasm
+~$*.SLDPRT
+~$*.SLDASM
