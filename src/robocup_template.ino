@@ -18,6 +18,7 @@
 #include <Wire.h>                   //for I2C and SPI
 #include <TaskScheduler.h>          //scheduler
 #include <VL53L1X.h>                //VL53L1X distance sensor
+#include <VL53L0X.h>                //VL53L0X distance sensor for top target validation
 #include <stdarg.h>                 //for va_list in printf functions
 #include <stdio.h>                  //for vsnprintf
 #include <string.h>                 //for strcmp/sscanf parsing
@@ -35,10 +36,12 @@
 #include "ir_xy_position.h"         //IR XY position sensor
 #include "ir_distance_sensor.h"     //2Y0A02 IR distance sensor
 #include "tof_sensor_array.h"       //TOF (VL53L1X) sensor array
+#include "target_detector.h"        //Tier-based target / obstacle detection
 #include "TOF_X8.h"                 // DFRobot Matrix Lidar 8x8 (TOF_X8)
 #include "dc_motor.h"               //DC motor control 
 #include "motor_control.h"          //PID/SYNC command handling
 #include "ch9143_bluetooth.h"       //CH9143 Bluetooth module
+#include "optical_flow.h"           // PMW3901 optical flow (Bitcraze)
 
 //**********************************************************************************
 // Local Definitions
@@ -64,6 +67,9 @@
 #define VL53L1X_SENSOR_READ_PERIOD          100
 #define IR_DISTANCE_SENSOR_READ_PERIOD      50
 #define DC_MOTOR_CONTROL_PERIOD             40
+
+#define OF_READ_TASK_PERIOD                 40
+#define OF_READ_TASK_NUM_EXECUTE            -1
 
 #define HERKULEX_TEST_PERIOD               1200
 
@@ -101,8 +107,10 @@
 #define IR_DISTANCE_SENSOR_PIN    A9  // Analog pin for 2Y0A02 IR distance sensor
 
 // VL53L1X sensor configuration
-const uint8_t VL53L1X_SENSOR_COUNT = 4;  // Update this if you add more sensors
-const uint8_t VL53L1X_XSHUT_PINS[VL53L1X_SENSOR_COUNT] = { 0, 1, 2, 3 };  // Update this with the XSHUT pins for each sensor
+const uint8_t VL53L1X_SENSOR_COUNT = 5;  // 5 tier sensors
+const uint8_t VL53L1X_XSHUT_PINS[VL53L1X_SENSOR_COUNT] = { 0, 1, 2, 3, 4};  // Update this with the XSHUT pins for each sensor
+const uint8_t VL53L0X_TOP_XSHUT_EXPANDER_PIN = 4;  // SX1509 expander pin 4 for top VL53L0X sensor XSHUT
+#define VL53L0X_TOP_XSHUT_PIN 6   // Legacy: kept for reference (actual XSHUT is on expander pin 4)
 
 // DC Motor PIN definitions
 #define DC_M1_PIN 0              //PWM pin for DC motor control (can be extended to 2 motors)
@@ -145,6 +153,9 @@ IMU_Data current_imu_data;
 // Proximity Sensor instance
 ProximitySensor proximitySensor(PROXIMITY_SENSOR_PIN);
 
+// Optical flow sensor (PMW3901) using SPI: CS on D10, MOSI D11, MISO D12, SCK D13
+OpticalFlow opticalFlow(10);
+
 // Ultrasonic Sensor instance (kept for backwards compatibility)
 // UltrasonicSensor ultrasonicSensor(ULTRASONIC_TRIGGER_PIN_1, ULTRASONIC_ECHO_PIN_1);
 
@@ -162,6 +173,7 @@ IRDistanceSensor irDistanceSensor(IR_DISTANCE_SENSOR_PIN);
 
 // TOF Sensor Array instance (explicit SX1509 I2C address 0x3F)
 TOFSensorArray tofSensorArray(VL53L1X_SENSOR_COUNT, 0x3F);
+TieredTargetDetector targetDetector(tofSensorArray, 0, 1, 2, 3);
 
 // CH9143 Bluetooth instance
 CH9143Bluetooth bluetooth(&Serial7, BLUETOOTH_RX_PIN, BLUETOOTH_TX_PIN, BLUETOOTH_BAUD);
@@ -171,10 +183,18 @@ int16_t cmd_left_motor = 0;
 int16_t cmd_right_motor = 0;
 unsigned long cmd_last_rx_ms = 0;
 
+// Output shaping for smooth motion (applied to all command sources)
+// tDC_motor runs every 40 ms, so step 8 ~= 200 speed-units/second.
+static int16_t applied_left_motor = 0;
+static int16_t applied_right_motor = 0;
+static const int16_t MOTOR_SLEW_STEP = 8;
+
 // Forward declarations for command handling
 void process_bluetooth_motor_commands(void);
 void process_usb_motor_commands(void);
 void handle_motor_line(const char* line, Print* ackPort);
+bool handle_sensor_line(const char* line, Print* ackPort);
+int16_t slew_toward(int16_t current, int16_t target, int16_t step);
 
 // Task wrapper for proximity sensor reading
 void proximity_sensor_callback(void) {
@@ -216,52 +236,87 @@ void ir_xy_position_callback(void) {
     }
 }
 
+// Task wrapper for optical flow sensor reading
+void optical_flow_callback(void) {
+    int16_t dx = 0, dy = 0;
+    if (opticalFlow.read(dx, dy)) {
+        // accumulate counts and print total distance in mm
+        opticalFlow.addMotionCounts(dx, dy);
+        float tx = opticalFlow.getTotalXmm();
+        float ty = opticalFlow.getTotalYmm();
+        printfBoth("OpticalFlow totalX: %.2f mm  totalY: %.2f mm\n", tx, ty);
+    }
+}
+
 // Task wrapper for VL53L1X sensor reading
 void vl53l1x_sensor_callback(void) {
-    if (tofSensorArray.isInitialized()) {
-        TOFSensorArray::TOFData tofData = tofSensorArray.readDistances();
-
-        // Print VL53L1X distances inline
-        Serial.print("\t");
-        for (uint8_t i = 0; i < tofData.sensorCount; i++) {
-            Serial.print("S");
-            Serial.print(i);
-            Serial.print(":");
-            if (tofData.distances[i] == 0xFFFF) {
-                Serial.print("TIMEOUT");
-            } else {
-                Serial.print(tofData.distances[i]);
-            }
-            if (i < tofData.sensorCount - 1) Serial.print("\t");
+    if (!tofSensorArray.isInitialized()) {
+        static bool warned = false;
+        if (!warned) {
+            Serial.println("WARNING: VL53L1X sensor array not initialized, no S0-S3 data available");
+            warned = true;
         }
+        return;
+    }
 
-        // If the DFRobot Matrix Lidar (8x8) is present, print it as 8 rows
-        if (TOF_X8_isInitialized()) {
-            uint16_t x8buf[64];
-            if (TOF_X8_readAll(x8buf, 64)) {
-                // Print each row on its own line, prefixed with a tab for alignment
-                Serial.print('\n');
-                Serial.print('\n');
-                for (uint8_t y = 0; y < 8; y++) {
-                    Serial.print('\t');
-                    Serial.print("Y");
-                    Serial.print(y);
-                    Serial.print(": ");
-                    for (uint8_t x = 0; x < 8; x++) {
-                        Serial.print(x8buf[y * 8 + x]);
-                        if (x < 7) Serial.print(",");
-                    }
-                    Serial.println();
-                }
-                Serial.print('\n');
-            } else {
-                Serial.println('\t',"X8:ERR");
-            }
+    TOFSensorArray::TOFData tofData = tofSensorArray.readDistances();
+
+    // Print VL53L1X distances inline
+    Serial.print("\t");
+    for (uint8_t i = 0; i < tofData.sensorCount; i++) {
+        Serial.print("S");
+        Serial.print(i);
+        Serial.print(":");
+        if (tofData.distances[i] == 0xFFFF) {
+            Serial.print("TIMEOUT");
         } else {
-            // No X8 initialization; print explicit marker so absence is visible
-            Serial.print('\t');
-            Serial.println("X8:NOTINIT");
+            Serial.print(tofData.distances[i]);
         }
+        if (i < tofData.sensorCount - 1) Serial.print("\t");
+    }
+
+    uint16_t topDistance = 0xFFFF;
+    if (!tofSensorArray.isTopSensorInArray() && tofSensorArray.isTopSensorInitialized()) {
+        topDistance = tofSensorArray.readTopSensorDistance();
+        Serial.print("\tS5:");
+        if (topDistance == 0xFFFF) {
+            Serial.print("TIMEOUT");
+        } else {
+            Serial.print(topDistance);
+        }
+    } else if (!tofSensorArray.isTopSensorInArray()) {
+        Serial.print("\tS5:NOTINIT");
+    }
+
+    targetDetector.update(topDistance);
+
+    // If the DFRobot Matrix Lidar (8x8) is present, print it as 8 rows
+    if (TOF_X8_isInitialized()) {
+        uint16_t x8buf[64];
+        if (TOF_X8_readAll(x8buf, 64)) {
+            // Print each row on its own line, prefixed with a tab for alignment
+            Serial.print('\n');
+            Serial.print('\n');
+            for (uint8_t y = 0; y < 8; y++) {
+                Serial.print('\t');
+                Serial.print("Y");
+                Serial.print(y);
+                Serial.print(": ");
+                for (uint8_t x = 0; x < 8; x++) {
+                    Serial.print(x8buf[y * 8 + x]);
+                    if (x < 7) Serial.print(",");
+                }
+                Serial.println();
+            }
+            Serial.print('\n');
+        } else {
+            Serial.print('\t');
+            Serial.println("X8:ERR");
+        }
+    } else {
+        // No X8 initialization; print explicit marker so absence is visible
+        Serial.print('\t');
+        Serial.println("X8:NOTINIT");
     }
 }
 
@@ -288,11 +343,16 @@ void imu_task_callback(void) {
 
 // Task wrapper for DC motor control
 void dc_motor_callback(void) {
-    int16_t left_cmd = cmd_left_motor;
-    int16_t right_cmd = cmd_right_motor;
+    int16_t left_target = cmd_left_motor;
+    int16_t right_target = cmd_right_motor;
+
+    // Smoothly approach targets to avoid abrupt jumps and harsh reversals.
+    // This ensures transitions like full straight -> full left are gradual.
+    applied_left_motor = slew_toward(applied_left_motor, left_target, MOTOR_SLEW_STEP);
+    applied_right_motor = slew_toward(applied_right_motor, right_target, MOTOR_SLEW_STEP);
 
     // Latch behavior: hold last commanded speeds until changed
-    driveMotor.setSpeeds(left_cmd, right_cmd);
+    driveMotor.setSpeeds(applied_left_motor, applied_right_motor);
 
     // Print encoder pulse counts to USB serial at a limited rate
     static unsigned long lastEncoderPrintMs = 0;
@@ -306,6 +366,22 @@ void dc_motor_callback(void) {
         Serial.println(driveMotor.getRightEncoderPulses());
         lastEncoderPrintMs = now;
     }
+}
+
+int16_t slew_toward(int16_t current, int16_t target, int16_t step) {
+    if (step <= 0) {
+        return target;
+    }
+
+    int delta = (int)target - (int)current;
+    if (delta > step) {
+        delta = step;
+    } else if (delta < -step) {
+        delta = -step;
+    }
+
+    int next = (int)current + delta;
+    return (int16_t)constrain(next, -100, 100);
 }
 
 // Bluetooth stream test — called every 200 ms by the task scheduler.
@@ -333,7 +409,9 @@ void process_bluetooth_motor_commands(void) {
         if (c == '\n') {
             lineBuffer[idx] = '\0';
             if (idx > 0) {
-                handle_motor_line(lineBuffer, bluetooth.isInitialized() ? (Print*)&Serial7 : nullptr);
+                if (!handle_sensor_line(lineBuffer, bluetooth.isInitialized() ? (Print*)&Serial7 : nullptr)) {
+                    handle_motor_line(lineBuffer, bluetooth.isInitialized() ? (Print*)&Serial7 : nullptr);
+                }
             }
             idx = 0;
             continue;
@@ -363,7 +441,9 @@ void process_usb_motor_commands(void) {
         if (c == '\n') {
             lineBuffer[idx] = '\0';
             if (idx > 0) {
-                handle_motor_line(lineBuffer, &Serial);
+                if (!handle_sensor_line(lineBuffer, &Serial)) {
+                    handle_motor_line(lineBuffer, &Serial);
+                }
             }
             idx = 0;
             continue;
@@ -382,6 +462,10 @@ void process_usb_motor_commands(void) {
 //   MOTOR <left> <right>           where left/right are in [-100, 100]
 //   STOP
 //   PID ... / SYNC ...             handled by motor_control.cpp
+//   FLOW RESET                     reset accumulated optical-flow totals
+//   FLOW STATUS                    print optical-flow totals (mm)
+//   FLOW LED <ON|OFF>              enable/disable optical-flow illumination LED
+//   FLOW SCALE <mm_per_count>      set millimetres-per-motion-count scale
 void handle_motor_line(const char* line, Print* ackPort) {
     // Convert input line to uppercase for case-insensitive command matching
     char upperLine[64];
@@ -421,6 +505,60 @@ void handle_motor_line(const char* line, Print* ackPort) {
         return;
     }
 
+    // Optical flow control commands (FLOW ...)
+    if (strncmp(upperLine, "FLOW", 4) == 0) {
+        if (strcmp(upperLine, "FLOW RESET") == 0) {
+            opticalFlow.resetTotals();
+            cmd_last_rx_ms = millis();
+            if (ackPort != nullptr) ackPort->println("ACK FLOW RESET");
+            else Serial.println("ACK FLOW RESET");
+            return;
+        }
+
+        if (strcmp(upperLine, "FLOW STATUS") == 0) {
+            float tx = opticalFlow.getTotalXmm();
+            float ty = opticalFlow.getTotalYmm();
+            if (ackPort != nullptr) {
+                ackPort->printf("FLOW STATUS X: %.2f mm Y: %.2f mm\n", tx, ty);
+            } else {
+                Serial.printf("FLOW STATUS X: %.2f mm Y: %.2f mm\n", tx, ty);
+            }
+            return;
+        }
+
+        if (strncmp(upperLine, "FLOW LED ", 9) == 0) {
+            if (strcmp(upperLine + 9, "ON") == 0) {
+                opticalFlow.setLed(true);
+                if (ackPort != nullptr) ackPort->println("ACK FLOW LED ON");
+                else Serial.println("ACK FLOW LED ON");
+                return;
+            }
+            if (strcmp(upperLine + 9, "OFF") == 0) {
+                opticalFlow.setLed(false);
+                if (ackPort != nullptr) ackPort->println("ACK FLOW LED OFF");
+                else Serial.println("ACK FLOW LED OFF");
+                return;
+            }
+        }
+
+        float scale = 0.0f;
+        if (sscanf(upperLine, "FLOW SCALE %f", &scale) == 1) {
+            opticalFlow.setScaleMMPerCount(scale);
+            if (ackPort != nullptr) {
+                ackPort->print("ACK FLOW SCALE ");
+                ackPort->println(scale);
+            } else {
+                Serial.print("ACK FLOW SCALE ");
+                Serial.println(scale);
+            }
+            return;
+        }
+
+        if (ackPort != nullptr) ackPort->println("ERR Unknown FLOW command (RESET, STATUS, LED, SCALE)");
+        else Serial.println("ERR Unknown FLOW command (RESET, STATUS, LED, SCALE)");
+        return;
+    }
+
     if (motorControlHandleCommandLine(upperLine, ackPort)) {
         return;
     }
@@ -428,6 +566,38 @@ void handle_motor_line(const char* line, Print* ackPort) {
     if (ackPort != nullptr) {
         ackPort->println("ERR Unknown command (MOTOR <L> <R>, STOP, PID..., SYNC...)");
     }
+}
+
+bool handle_sensor_line(const char* line, Print* ackPort) {
+    // Convert input line to uppercase for case-insensitive command matching
+    char upperLine[64];
+    strncpy(upperLine, line, sizeof(upperLine) - 1);
+    upperLine[sizeof(upperLine) - 1] = '\0';
+    for (int i = 0; upperLine[i] != '\0'; i++) {
+        upperLine[i] = toupper((unsigned char)upperLine[i]);
+    }
+
+    if (strcmp(upperLine, "SENSOR DEBUG") == 0) {
+        if (ackPort != nullptr) {
+            ackPort->println("SENSOR DEBUG:");
+            targetDetector.debugPrint();
+        } else {
+            Serial.println("SENSOR DEBUG:");
+            targetDetector.debugPrint();
+        }
+        return true;
+    }
+
+    if (strncmp(upperLine, "SENSOR", 6) == 0) {
+        if (ackPort != nullptr) {
+            ackPort->println("ERR Unknown sensor command");
+        } else {
+            Serial.println("ERR Unknown sensor command");
+        }
+        return true;
+    }
+
+    return false;
 }
 
 // Herkulex continuous test callback: toggles between -100 and 100 degrees
@@ -461,6 +631,7 @@ Task tIR_XY_Position(IR_READ_TASK_PERIOD, IR_READ_TASK_NUM_EXECUTE, &ir_xy_posit
 Task tVL53L1X_sensor(VL53L1X_SENSOR_READ_PERIOD, VL53L1X_SENSOR_NUM_EXECUTE, &vl53l1x_sensor_callback);
 Task tTOF_X8(VL53L1X_SENSOR_READ_PERIOD, VL53L1X_SENSOR_NUM_EXECUTE, &TOF_X8_task_callback);
 Task tIR_Distance_sensor(IR_DISTANCE_SENSOR_READ_PERIOD, IR_DISTANCE_SENSOR_NUM_EXECUTE, &ir_distance_sensor_callback);
+Task tOpticalFlow(OF_READ_TASK_PERIOD, OF_READ_TASK_NUM_EXECUTE, &optical_flow_callback);
 Task tSensor_average(SENSOR_AVERAGE_PERIOD,      SENSOR_AVERAGE_NUM_EXECUTE,      &sensor_average);
 Task tHerkulexTest(HERKULEX_TEST_PERIOD, -1, &herkulex_test_callback);
 Task tBT_stream_test(200, -1, &bt_stream_test_callback);  // Stream test: every 200ms
@@ -536,11 +707,11 @@ void setup() {
   delay(2000);  // Give USB serial time to stabilize
   Serial.println("\n\n=== RoboCup Robot Starting ===");
   
-  // CH9143 two-chip bridge architecture:
-  //   PC (USB-C) --> CH9143 [USB chip]  ~~~BLE~~~  CH9143 [UART chip] --> Serial7 --> Teensy
-  // The UART chip communicates at 115200 (CH9143 factory default).
-  // No Bluetooth pairing needed on the PC \u2014 it connects via USB-C to the USB chip.
-  Serial7.begin(BLUETOOTH_BAUD);
+// CH9143 two-chip bridge architecture:
+//   PC (USB-C) --> CH9143 [USB chip]  ~~~BLE~~~  CH9143 [UART chip] --> Serial7 --> Teensy
+// The UART chip communicates at 115200 (CH9143 factory default).
+// No Bluetooth pairing needed on the PC \u2014 it connects via USB-C to the USB chip.
+// Serial7 is initialized by bluetooth.begin() during robot_init().
   
   Wire.begin();        // MUST be called FIRST - before any I2C operations
   pin_init();
@@ -630,24 +801,58 @@ void robot_init() {
     printlnBoth("Initialising IR XY Position Sensor...");
     irXYSensor.begin();
     
+    printlnBoth("Initialising Optical Flow (PMW3901) on SPI CS D10...");
+    if (!opticalFlow.begin()) {
+        printlnBoth("WARNING: Optical Flow init failed");
+    } else {
+        printlnBoth("Optical Flow initialized");
+    }
+
     printlnBoth("Initialising IR Distance Sensor (2Y0A02)...");
     irDistanceSensor.begin();
     
-    printlnBoth("Initialising TOF (VL53L1X) Sensor Array...");
+    printlnBoth("Initialising TOF Sensors...");
     Wire.setClock(400000); // use 400 kHz I2C
-    
-    // Set XSHUT pins for each sensor
+
+    // Initialize VL53L1X sensor array.
+    // The top VL53L0X will be held in reset via the expander until after array init completes.
+    printlnBoth("Initialising VL53L1X Sensor Array...");
     tofSensorArray.setXSHUTPins(VL53L1X_XSHUT_PINS, VL53L1X_SENSOR_COUNT);
+    tofSensorArray.setTopSensorXshutPin(VL53L0X_TOP_XSHUT_EXPANDER_PIN);
     
-    // Initialize the TOF sensor array
-    if (!tofSensorArray.begin()) {
+    bool tofArrayOk = tofSensorArray.begin();
+    if (!tofArrayOk) {
         printlnBoth("WARNING: Failed to initialize TOF sensor array");
+        printlnBoth("Running TOF XSHUT diagnostic for each sensor...");
+        for (uint8_t i = 0; i < VL53L1X_SENSOR_COUNT; i++) {
+            Serial.print("--- Diagnostic for TOF sensor index ");
+            Serial.println(i);
+            tofSensorArray.diagnoseSensorByIndex(i);
+            delay(500);
+        }
     } else {
-        printlnBoth("TOF sensor array initialized successfully");
+        printlnBoth("VL53L1X sensor array initialized successfully");
         tofSensorArray.setDistanceOffset(0, 0);   // Sensor 0 offset
-        tofSensorArray.setDistanceOffset(1, -40); // Sensor 1 offset
-        tofSensorArray.setDistanceOffset(2, 0);  // Sensor 2 offset
+        tofSensorArray.setDistanceOffset(1, 0); // Sensor 1 offset
+        tofSensorArray.setDistanceOffset(2, -40);  // Sensor 2 offset
+        tofSensorArray.setDistanceOffset(3, 0);  // Sensor 3 offset
+        tofSensorArray.setDistanceOffset(4, 0);  // Sensor 4 offset
     }
+
+    // Initialize top VL53L0X sensor using the integrated TOFSensorArray method
+    printlnBoth("Initialising top VL53L0X sensor on expander pin 4...");
+    tofSensorArray.setTopSensorXshutPin(VL53L0X_TOP_XSHUT_EXPANDER_PIN);
+    if (!tofSensorArray.initializeTopSensor()) {
+        printlnBoth("WARNING: Failed to initialize top VL53L0X sensor");
+    }
+
+    TieredTargetDetectorConfig targetConfig;
+    targetConfig.nearIntersectMm = 300;
+    targetConfig.farIntersectMm = 500;
+    targetConfig.intersectionToleranceMm = 35;
+    targetConfig.topSensorClearanceMm = 80;
+    targetConfig.topSensorRejectMarginMm = 40;
+    targetDetector.setConfig(targetConfig);
 
     // Initialize optional DFRobot Matrix Lidar (8x8 matrix) if connected
     printlnBoth("Initialising DFRobot Matrix Lidar (TOF_X8)...");
@@ -712,8 +917,9 @@ void task_init() {
   //taskManager.addTask(tCheck_watchdog);
   //taskManager.addTask(tVictory_dance);      
 
-    taskManager.addTask(tHerkulexTest);
-    taskManager.addTask(tBT_stream_test);  // Bluetooth stream test
+    // taskManager.addTask(tHerkulexTest);
+    // taskManager.addTask(tBT_stream_test);  // Disabled for control reliability
+    // taskManager.addTask(tOpticalFlow);        //reading optical flow sensor
 
     //enable the tasks
   tRead_ultrasonic.enable();
@@ -738,7 +944,8 @@ void task_init() {
  //tCheck_watchdog.enable();
  //tVictory_dance.enable();
    tHerkulexTest.enable();
-   tBT_stream_test.enable();
+    // tBT_stream_test.enable();  // Disabled for control reliability
+    tOpticalFlow.enable();
 
  printlnBoth("Tasks have been initialised \n");
 }
