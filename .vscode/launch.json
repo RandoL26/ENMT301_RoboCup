@@ -12,9 +12,9 @@
             "type": "platformio-debug",
             "request": "launch",
             "name": "PIO Debug",
-            "executable": "P:/TEMP/ENMT301_RoboCup/.pio/build/teensy40/firmware.elf",
+            "executable": "C:/Users/mfi77/OneDrive - University of Canterbury/3rd Year S1/ENMT301/Robocup/ENMT301_RoboCup/.pio/build/teensy40/firmware.elf",
             "projectEnvName": "teensy40",
-            "toolchainBinDir": "C:/Users/bjm242/.platformio/packages/toolchain-gccarmnoneeabi-teensy/bin",
+            "toolchainBinDir": "C:/Users/mfi77/.platformio/packages/toolchain-gccarmnoneeabi-teensy/bin",
             "internalConsoleOptions": "openOnSessionStart",
             "preLaunchTask": {
                 "type": "PlatformIO",
@@ -25,18 +25,18 @@
             "type": "platformio-debug",
             "request": "launch",
             "name": "PIO Debug (skip Pre-Debug)",
-            "executable": "P:/TEMP/ENMT301_RoboCup/.pio/build/teensy40/firmware.elf",
+            "executable": "C:/Users/mfi77/OneDrive - University of Canterbury/3rd Year S1/ENMT301/Robocup/ENMT301_RoboCup/.pio/build/teensy40/firmware.elf",
             "projectEnvName": "teensy40",
-            "toolchainBinDir": "C:/Users/bjm242/.platformio/packages/toolchain-gccarmnoneeabi-teensy/bin",
+            "toolchainBinDir": "C:/Users/mfi77/.platformio/packages/toolchain-gccarmnoneeabi-teensy/bin",
             "internalConsoleOptions": "openOnSessionStart"
         },
         {
             "type": "platformio-debug",
             "request": "launch",
             "name": "PIO Debug (without uploading)",
-            "executable": "P:/TEMP/ENMT301_RoboCup/.pio/build/teensy40/firmware.elf",
+            "executable": "C:/Users/mfi77/OneDrive - University of Canterbury/3rd Year S1/ENMT301/Robocup/ENMT301_RoboCup/.pio/build/teensy40/firmware.elf",
             "projectEnvName": "teensy40",
-            "toolchainBinDir": "C:/Users/bjm242/.platformio/packages/toolchain-gccarmnoneeabi-teensy/bin",
+            "toolchainBinDir": "C:/Users/mfi77/.platformio/packages/toolchain-gccarmnoneeabi-teensy/bin",
             "internalConsoleOptions": "openOnSessionStart",
             "loadMode": "manual"
         }
