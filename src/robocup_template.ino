@@ -39,6 +39,7 @@
 #include "motor_control.h"          //PID/SYNC command handling
 #include "ch9143_bluetooth.h"       //CH9143 Bluetooth module
 #include "optical_flow.h"           // PMW3901 optical flow (Bitcraze)
+#include "ld06.h"                   // LD06 LiDAR
 
 //**********************************************************************************
 // Local Definitions
@@ -67,6 +68,9 @@
 
 #define OF_READ_TASK_PERIOD                 40
 #define OF_READ_TASK_NUM_EXECUTE            -1
+
+#define LD06_READ_TASK_PERIOD               1
+#define LD06_READ_TASK_NUM_EXECUTE          -1
 
 #define HERKULEX_TEST_PERIOD               1200
 
@@ -150,6 +154,9 @@ ProximitySensor proximitySensor(PROXIMITY_SENSOR_PIN);
 
 // Optical flow sensor (PMW3901) using SPI: CS on D10, MOSI D11, MISO D12, SCK D13
 OpticalFlow opticalFlow(10);
+
+// LD06 LiDAR on Serial2 (UART @ 230400 configured in ld06.init())
+LD06 ld06(Serial2);
 
 // Ultrasonic Sensor instance (kept for backwards compatibility)
 // UltrasonicSensor ultrasonicSensor(ULTRASONIC_TRIGGER_PIN_1, ULTRASONIC_ECHO_PIN_1);
@@ -238,6 +245,39 @@ void optical_flow_callback(void) {
         float tx = opticalFlow.getTotalXmm();
         float ty = opticalFlow.getTotalYmm();
         printfBoth("OpticalFlow totalX: %.2f mm  totalY: %.2f mm\n", tx, ty);
+    }
+}
+
+// Task wrapper for LD06 LiDAR reading
+void ld06_lidar_callback(void) {
+    int uart2AvailBefore = Serial2.available();
+
+    // Same usage as Basic.ino: when a full scan is ready, stream Teleplot format.
+    bool scanReady = ld06.readScan();
+    if (scanReady) {
+        ld06.printScanTeleplot(Serial);
+    }
+
+    // Lightweight diagnostics once per second (helps verify UART traffic/CRC/scan state)
+    static uint32_t lastDiagMs = 0;
+    uint32_t now = millis();
+    if (now - lastDiagMs >= 1000) {
+        lastDiagMs = now;
+        static uint16_t prevCrcFail = 0;
+        uint16_t crcFail = ld06.getChecksumFailCount();
+        uint16_t crcDelta = crcFail - prevCrcFail;
+        prevCrcFail = crcFail;
+
+        Serial.print("LD06 diag | ready:");
+        Serial.print(scanReady ? 1 : 0);
+        Serial.print(" pts:");
+        Serial.print(ld06.getNbPointsInScan());
+        Serial.print(" crcFail:");
+        Serial.print(crcFail);
+        Serial.print(" crcDelta:");
+        Serial.print(crcDelta);
+        Serial.print(" uart2In:");
+        Serial.println(uart2AvailBefore);
     }
 }
 
@@ -524,6 +564,7 @@ Task tIR_XY_Position(IR_READ_TASK_PERIOD, IR_READ_TASK_NUM_EXECUTE, &ir_xy_posit
 Task tVL53L1X_sensor(VL53L1X_SENSOR_READ_PERIOD, VL53L1X_SENSOR_NUM_EXECUTE, &vl53l1x_sensor_callback);
 Task tIR_Distance_sensor(IR_DISTANCE_SENSOR_READ_PERIOD, IR_DISTANCE_SENSOR_NUM_EXECUTE, &ir_distance_sensor_callback);
 Task tOpticalFlow(OF_READ_TASK_PERIOD, OF_READ_TASK_NUM_EXECUTE, &optical_flow_callback);
+Task tLD06_lidar(LD06_READ_TASK_PERIOD, LD06_READ_TASK_NUM_EXECUTE, &ld06_lidar_callback);
 Task tSensor_average(SENSOR_AVERAGE_PERIOD,      SENSOR_AVERAGE_NUM_EXECUTE,      &sensor_average);
 Task tHerkulexTest(HERKULEX_TEST_PERIOD, -1, &herkulex_test_callback);
 Task tBT_stream_test(200, -1, &bt_stream_test_callback);  // Stream test: every 200ms
@@ -700,6 +741,11 @@ void robot_init() {
         printlnBoth("Optical Flow initialized");
     }
 
+    printlnBoth("Initialising LD06 LiDAR on Serial2...");
+    ld06.init();
+    ld06.enableFullScan();
+    printlnBoth("LD06 LiDAR initialized");
+
     printlnBoth("Initialising IR Distance Sensor (2Y0A02)...");
     irDistanceSensor.begin();
     
@@ -759,7 +805,7 @@ void task_init() {
     // taskManager.addTask(tVL53L1X_sensor);     //reading VL53L1X sensors
     //taskManager.addTask(tIR_Distance_sensor); //reading IR distance sensor (2Y0A02)  
     // taskManager.addTask(tSensor_average);
-    taskManager.addTask(tDC_motor);          //DC motor control
+    // taskManager.addTask(tDC_motor);          //DC motor control
   // taskManager.addTask(tSet_motor); 
   // taskManager.addTask(tWeight_scan);
   // taskManager.addTask(tCollect_weight);
@@ -773,6 +819,7 @@ void task_init() {
     // taskManager.addTask(tHerkulexTest);
     // taskManager.addTask(tBT_stream_test);  // Disabled for control reliability
     // taskManager.addTask(tOpticalFlow);        //reading optical flow sensor
+    taskManager.addTask(tLD06_lidar);          //reading LD06 lidar
 
     //enable the tasks
   tRead_ultrasonic.enable();
@@ -798,6 +845,7 @@ void task_init() {
    tHerkulexTest.enable();
     // tBT_stream_test.enable();  // Disabled for control reliability
     tOpticalFlow.enable();
+    tLD06_lidar.enable();
 
  printlnBoth("Tasks have been initialised \n");
 }
@@ -808,6 +856,9 @@ void task_init() {
 // put your main code here, to run repeatedly
 //**********************************************************************************
 void loop() {
+    // Poll LD06 as often as possible to avoid UART buffer overflow at 230400 baud.
+    ld06_lidar_callback();
+
     // Consume inbound Bluetooth control commands continuously
     process_bluetooth_motor_commands();
     // Also accept commands from USB serial monitor (direct wired testing)
