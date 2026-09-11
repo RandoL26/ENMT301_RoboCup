@@ -939,11 +939,11 @@ void task_init() {
     // taskManager.addTask(tUltrasonic_sensor);  //reading ultrasonic sensor
     // taskManager.addTask(tColor_sensor);       //reading color sensor
     // taskManager.addTask(tIR_XY_Position);     //reading IR XY position sensor
-    taskManager.addTask(tVL53L1X_sensor);     //reading VL53L1X sensors
-    taskManager.addTask(tTOF_X8);              //reading DFRobot Matrix Lidar 8x8 (if present)
+    //taskManager.addTask(tVL53L1X_sensor);     //reading VL53L1X sensors
+    //taskManager.addTask(tTOF_X8);              //reading DFRobot Matrix Lidar 8x8 (if present)
     //taskManager.addTask(tIR_Distance_sensor); //reading IR distance sensor (2Y0A02)  
     // taskManager.addTask(tSensor_average);
-    // taskManager.addTask(tDC_motor);          //DC motor control
+     taskManager.addTask(tDC_motor);          //DC motor control
   // taskManager.addTask(tSet_motor); 
   // taskManager.addTask(tWeight_scan);
   // taskManager.addTask(tCollect_weight);
@@ -970,7 +970,7 @@ void task_init() {
   tIR_XY_Position.enable();
   tVL53L1X_sensor.enable();
   tIR_Distance_sensor.enable();
-    tTOF_X8.enable();
+  tTOF_X8.enable();
   tSensor_average.enable();
   tDC_motor.enable();
   tSet_motor.enable();
@@ -1003,10 +1003,6 @@ void loop() {
     process_usb_motor_commands();
   
     taskManager.execute();    //execute the scheduler
-<<<<<<< HEAD
     //Serial.println("Another scheduler execution cycle has oocured \n");
-=======
-  //Serial.println("Another scheduler execution cycle has oocured \n");
->>>>>>> 77584568cf6e9ae1e75e31906e8724843f5623f7
 }
 
