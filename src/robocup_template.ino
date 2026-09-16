@@ -268,16 +268,7 @@ void ld06_lidar_callback(void) {
         uint16_t crcDelta = crcFail - prevCrcFail;
         prevCrcFail = crcFail;
 
-        Serial.print("LD06 diag | ready:");
-        Serial.print(scanReady ? 1 : 0);
-        Serial.print(" pts:");
-        Serial.print(ld06.getNbPointsInScan());
-        Serial.print(" crcFail:");
-        Serial.print(crcFail);
-        Serial.print(" crcDelta:");
-        Serial.print(crcDelta);
-        Serial.print(" uart2In:");
-        Serial.println(uart2AvailBefore);
+        
     }
 }
 
@@ -332,11 +323,7 @@ void dc_motor_callback(void) {
         Serial.print("ENC L:");
         Serial.print(driveMotor.getLeftEncoderPulses());
         Serial.print(" R:");
-<<<<<<< HEAD
-        Serial.println(-dcMotor2.getEncoderPulses());
-=======
         Serial.println(driveMotor.getRightEncoderPulses());
->>>>>>> 2d3d53180d7c2482674834829ca71dc8609007be
         lastEncoderPrintMs = now;
     }
 }
@@ -447,13 +434,8 @@ void handle_motor_line(const char* line, Print* ackPort) {
     int left = 0;
     int right = 0;
 
-<<<<<<< HEAD
-    if (sscanf(line, "MOTOR %d %d", &left, &right) == 2) {
-        left = constrain(left - 14, -100, 100);
-=======
     if (sscanf(upperLine, "MOTOR %d %d", &left, &right) == 2) {
         left = constrain(left, -100, 100);
->>>>>>> 2d3d53180d7c2482674834829ca71dc8609007be
         right = constrain(right, -100, 100);
 
         cmd_left_motor = (int16_t)left;
@@ -469,27 +451,10 @@ void handle_motor_line(const char* line, Print* ackPort) {
         return;
     }
 
-<<<<<<< HEAD
-    if (strcmp(line, "FWRD1") == 0) {
-        bt_left_motor_cmd = 50 - 14;
-        bt_right_motor_cmd = 50;
-        bt_last_cmd_ms = millis();
-        if (ackPort != nullptr) {
-            ackPort->println("ACK 50 50");
-        }
-        return;
-    }
-
-    if (strcmp(line, "STOP") == 0) {
-        bt_left_motor_cmd = 0;
-        bt_right_motor_cmd = 0;
-        bt_last_cmd_ms = millis();
-=======
     if (strcmp(upperLine, "STOP") == 0) {
         cmd_left_motor = 0;
         cmd_right_motor = 0;
         cmd_last_rx_ms = millis();
->>>>>>> 2d3d53180d7c2482674834829ca71dc8609007be
         if (ackPort != nullptr) {
             ackPort->println("ACK STOP");
         }
@@ -882,19 +847,14 @@ void task_init() {
 // put your main code here, to run repeatedly
 //**********************************************************************************
 void loop() {
-    // Poll LD06 as often as possible to avoid UART buffer overflow at 230400 baud.
-    ld06_lidar_callback();
+    // LD06 lidar is polled by its scheduled task `tLD06_lidar`.
 
     // Consume inbound Bluetooth control commands continuously
     process_bluetooth_motor_commands();
-<<<<<<< HEAD
-        // Also accept commands from USB serial monitor (direct wired testing)
-=======
     // Also accept commands from USB serial monitor (direct wired testing)
->>>>>>> 2d3d53180d7c2482674834829ca71dc8609007be
     process_usb_motor_commands();
   
-  taskManager.execute();    //execute the scheduler
+    taskManager.execute();    //execute the scheduler
   //Serial.println("Another scheduler execution cycle has oocured \n");
 }
 
