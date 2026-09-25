@@ -69,7 +69,7 @@
 #define OF_READ_TASK_PERIOD                 40
 #define OF_READ_TASK_NUM_EXECUTE            -1
 
-#define LD06_READ_TASK_PERIOD               1
+#define LD06_READ_TASK_PERIOD               50
 #define LD06_READ_TASK_NUM_EXECUTE          -1
 
 #define HERKULEX_TEST_PERIOD               1200
@@ -148,6 +148,8 @@ struct bno055_t bno055;
 
 // Global IMU data storage (for inter-task communication)
 IMU_Data current_imu_data;
+// Initial heading offset (set at IMU init to make headings relative to startup)
+float imu_heading_offset = 0.0f;
 
 // Proximity Sensor instance
 ProximitySensor proximitySensor(PROXIMITY_SENSOR_PIN);
@@ -268,6 +270,10 @@ void ld06_lidar_callback(void) {
         uint16_t crcDelta = crcFail - prevCrcFail;
         prevCrcFail = crcFail;
 
+        // Print lightweight diagnostics so we can see if Serial2 is receiving data
+        int uart2AvailAfter = Serial2.available();
+        printfBoth("LD06 diag: uart2_avail_before=%d after=%d crc_fail_total=%u crc_fail_delta=%u scanReady=%s\n",
+               uart2AvailBefore, uart2AvailAfter, (unsigned int)crcFail, (unsigned int)crcDelta, scanReady ? "YES" : "NO");
         
     }
 }
@@ -291,14 +297,43 @@ void ir_distance_sensor_callback(void) {
 // Task wrapper for IMU reading
 void imu_task_callback(void) {
     current_imu_data = read_imu();
-    // Print IMU data to both Serial and Bluetooth
-    printfBoth("Raw Gyro X:%d Y:%d Z:%d | Accel: %d, %d, %d\n",
-               current_imu_data.gyro_x,
-               current_imu_data.gyro_y,
-               current_imu_data.gyro_z,
-               current_imu_data.accel_x,
-               current_imu_data.accel_y,
-               current_imu_data.accel_z);
+    // Print tidy IMU headings (relative to startup) and accelerations
+    float heading_rel = current_imu_data.euler_h - imu_heading_offset;
+    // Normalize heading to [-180,180]
+    while (heading_rel > 180.0f) heading_rel -= 360.0f;
+    while (heading_rel <= -180.0f) heading_rel += 360.0f;
+    // Compute accel-derived roll/pitch for sanity check
+    float ax = current_imu_data.accel_x;
+    float ay = current_imu_data.accel_y;
+    float az = current_imu_data.accel_z;
+    // Prevent division by zero
+    float denom = sqrtf(ay*ay + az*az);
+    float pitch_acc = 0.0f;
+    if (denom > 1e-6f) pitch_acc = atan2f(-ax, denom) * 180.0f / PI;
+    float roll_acc = 0.0f;
+    if (fabsf(az) > 1e-6f) roll_acc = atan2f(ay, az) * 180.0f / PI;
+        // Choose roll/pitch source: use accel-derived values when stationary (|g|-9.81 small)
+        float g = sqrtf(ax*ax + ay*ay + az*az);
+        const float G = 9.80665f;
+        const float G_THRESH = 0.5f; // m/s^2
+        float roll_out, pitch_out;
+        const char *src = "BNO";
+        if (fabsf(g - G) <= G_THRESH) {
+            // stationary: accelerometer gives reliable roll/pitch
+            roll_out = roll_acc;
+            pitch_out = pitch_acc;
+            src = "ACC";
+        } else {
+            roll_out = current_imu_data.euler_r;
+            pitch_out = current_imu_data.euler_p;
+        }
+        // Single-line output: Heading | roll/pitch(source) | accel XYZ
+        // printfBoth("Heading: %.2f\xC2\xB0 | R: %.2f\xC2\xB0 P: %.2f\xC2\xB0 (%s) | Accel(m/s^2): %.2f, %.2f, %.2f\n",
+        //                      heading_rel,
+        //                      roll_out,
+        //                      pitch_out,
+        //                      src,
+        //                      ax, ay, az);
 }
 
 // Task wrapper for DC motor control
@@ -766,6 +801,17 @@ void robot_init() {
         
         // Calibrate gyroscope to zero on startup
         calibrate_gyroscope();
+        // Read IMU once to capture initial fused heading as offset
+        delay(100);
+        IMU_Data init_imu = read_imu();
+        imu_heading_offset = init_imu.euler_h;
+        // Print calibration status (0..3 for each: sys, gyro, accel, mag)
+        unsigned char sys_cal=0, gyr_cal=0, acc_cal=0, mag_cal=0;
+        bno055_get_syscalib_status(&sys_cal);
+        bno055_get_gyrocalib_status(&gyr_cal);
+        bno055_get_accelcalib_status(&acc_cal);
+        bno055_get_magcalib_status(&mag_cal);
+        printfBoth("BNO055 calib status - SYS:%u GYR:%u ACC:%u MAG:%u\n", sys_cal, gyr_cal, acc_cal, mag_cal);
         
         printlnBoth("Initialising DC Motor...");
         driveMotor.begin();
@@ -788,7 +834,7 @@ void task_init() {
   // taskManager.addTask(tRead_ultrasonic);   //reading ultrasonic 
   // taskManager.addTask(tRead_infrared);
   // taskManager.addTask(tRead_colour);
-//   taskManager.addTask(tRead_imu);          //reading IMU
+  taskManager.addTask(tRead_imu);          //reading IMU
 //   taskManager.addTask(tProximity_sensor);  //reading proximity sensor
     // taskManager.addTask(tUltrasonic_sensor);  //reading ultrasonic sensor
     // taskManager.addTask(tColor_sensor);       //reading color sensor
@@ -853,7 +899,7 @@ void loop() {
     process_bluetooth_motor_commands();
     // Also accept commands from USB serial monitor (direct wired testing)
     process_usb_motor_commands();
-  
+
     taskManager.execute();    //execute the scheduler
   //Serial.println("Another scheduler execution cycle has oocured \n");
 }
