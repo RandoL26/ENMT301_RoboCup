@@ -26,6 +26,12 @@ struct {
 
 // Last timestamp for gyro integration
 unsigned long last_gyro_time_ms = 0;
+// Accelerometer EMA filter state
+static float accel_x_f = 0.0f;
+static float accel_y_f = 0.0f;
+static float accel_z_f = 0.0f;
+// EMA smoothing factor (alpha): lower = smoother/slower
+static const float ACCEL_EMA_ALPHA = 0.08f;
 
 // Read ultrasonic value
 void read_ultrasonic(/* Parameters */){
@@ -72,9 +78,24 @@ IMU_Data read_imu(void) {
   memset(&accel_data, 0, sizeof(struct bno055_accel));
   comres = bno055_read_accel_xyz(&accel_data);
   if (comres == SUCCESS) {
-    imu_data.accel_x = (float)accel_data.x / 100.0;
-    imu_data.accel_y = (float)accel_data.y / 100.0;
-    imu_data.accel_z = (float)accel_data.z / 100.0;
+    // Raw accel from BNO055 (scaled by driver): convert and filter
+    float raw_ax = (float)accel_data.x / 100.0f;
+    float raw_ay = (float)accel_data.y / 100.0f;
+    float raw_az = (float)accel_data.z / 100.0f;
+    // Initialize filters on first read (if zero)
+    if (accel_x_f == 0.0f && accel_y_f == 0.0f && accel_z_f == 0.0f) {
+      accel_x_f = raw_ax;
+      accel_y_f = raw_ay;
+      accel_z_f = raw_az;
+    } else {
+      accel_x_f = ACCEL_EMA_ALPHA * raw_ax + (1.0f - ACCEL_EMA_ALPHA) * accel_x_f;
+      accel_y_f = ACCEL_EMA_ALPHA * raw_ay + (1.0f - ACCEL_EMA_ALPHA) * accel_y_f;
+      accel_z_f = ACCEL_EMA_ALPHA * raw_az + (1.0f - ACCEL_EMA_ALPHA) * accel_z_f;
+    }
+    // Store filtered values into returned structure
+    imu_data.accel_x = accel_x_f;
+    imu_data.accel_y = accel_y_f;
+    imu_data.accel_z = accel_z_f;
   } else {
     Serial.print("Accel read failed: ");
     Serial.println(comres);
