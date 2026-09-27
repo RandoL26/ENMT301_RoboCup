@@ -40,6 +40,8 @@
 #include "ch9143_bluetooth.h"       //CH9143 Bluetooth module
 #include "optical_flow.h"           // PMW3901 optical flow (Bitcraze)
 #include "ld06.h"                   // LD06 LiDAR
+#include "BigServo.h"               // Big servo
+
 
 //**********************************************************************************
 // Local Definitions
@@ -65,6 +67,8 @@
 #define VL53L1X_SENSOR_READ_PERIOD          100
 #define IR_DISTANCE_SENSOR_READ_PERIOD      50
 #define DC_MOTOR_CONTROL_PERIOD             40
+#define BIG_SERVO_PERIOD                    1000
+
 
 #define OF_READ_TASK_PERIOD                 40
 #define OF_READ_TASK_NUM_EXECUTE            -1
@@ -97,6 +101,7 @@
 #define VL53L1X_SENSOR_NUM_EXECUTE          -1
 #define IR_DISTANCE_SENSOR_NUM_EXECUTE      -1
 #define DC_MOTOR_CONTROL_NUM_EXECUTE        -1
+#define BIG_SERVO_NUM_EXECUTE               -1
 
 // Pin deffinitions
 #define IO_POWER  49
@@ -202,6 +207,11 @@ int16_t slew_toward(int16_t current, int16_t target, int16_t step);
 void proximity_sensor_callback(void) {
     proximitySensor.update();
     proximitySensor.printStatus();
+    if (!(proximitySensor.isObjectDetected())){
+        collect_weight();
+    } else {
+        digitalWrite(ELECTROMAGNET_PIN, HIGH);
+    }
 }
 
 // Task wrapper for ultrasonic sensor reading (array with 2 sensors)
@@ -570,7 +580,20 @@ void herkulex_test_callback() {
     //printfBoth("Herkulex test move to %d\n", Herkulex.getPosition(HERKULEX_ID));
     toggle = !toggle;
 }
-
+int angle = 0;
+void big_servo_callback() {
+    
+    if (angle<50){
+        angle += 10;
+        bigServo_move(90);
+    } else if (angle<100) {
+        bigServo_move(180);
+        angle += 10;
+    } else {
+        angle = 0;
+    }
+    
+}
 //**********************************************************************************
 // Task Scheduler and Tasks
 //**********************************************************************************
@@ -613,6 +636,7 @@ Task tUnload_weights(UNLOAD_WEIGHTS_TASK_PERIOD, UNLOAD_WEIGHTS_TASK_NUM_EXECUTE
 // Tasks to check the 'watchdog' timer (These will need to be added in)
 //Task tCheck_watchdog(CHECK_WATCHDOG_TASK_PERIOD, CHECK_WATCHDOG_TASK_NUM_EXECUTE, &check_watchdog);
 //Task tVictory_dance(VICTORY_DANCE_TASK_PERIOD,   VICTORY_DANCE_TASK_NUM_EXECUTE,  &victory_dance);
+Task tBig_Servo(BIG_SERVO_PERIOD, BIG_SERVO_NUM_EXECUTE, &big_servo_callback);
 
 Scheduler taskManager;
 
@@ -676,7 +700,7 @@ void setup() {
   pin_init();
   robot_init();        // robot_init() calls BNO_Init() which needs I2C
   task_init();
-  
+  bigServo_setup();
   // Now that Bluetooth is initialized, send startup message
   if (bluetooth.isInitialized()) {
     bluetooth.println("Setup Complete");
@@ -835,7 +859,7 @@ void task_init() {
   // taskManager.addTask(tRead_infrared);
   // taskManager.addTask(tRead_colour);
   taskManager.addTask(tRead_imu);          //reading IMU
-//   taskManager.addTask(tProximity_sensor);  //reading proximity sensor
+    taskManager.addTask(tProximity_sensor);  //reading proximity sensor
     // taskManager.addTask(tUltrasonic_sensor);  //reading ultrasonic sensor
     // taskManager.addTask(tColor_sensor);       //reading color sensor
     // taskManager.addTask(tIR_XY_Position);     //reading IR XY position sensor
@@ -857,7 +881,7 @@ void task_init() {
     // taskManager.addTask(tBT_stream_test);  // Disabled for control reliability
     // taskManager.addTask(tOpticalFlow);        //reading optical flow sensor
     taskManager.addTask(tLD06_lidar);          //reading LD06 lidar
-
+    taskManager.addTask(tBig_Servo);
     //enable the tasks
   tRead_ultrasonic.enable();
   tRead_infrared.enable();
@@ -870,13 +894,14 @@ void task_init() {
   tVL53L1X_sensor.enable();
   tIR_Distance_sensor.enable();
   tSensor_average.enable();
-  tDC_motor.enable();
-  tSet_motor.enable();
+  //tDC_motor.enable();
+  //tSet_motor.enable();
   tWeight_scan.enable();
   tCollect_weight.enable();
   tReturn_to_base.enable();
   tDetect_base.enable();
   tUnload_weights.enable();
+  //tBig_Servo.enable();
  //tCheck_watchdog.enable();
  //tVictory_dance.enable();
    tHerkulexTest.enable();
