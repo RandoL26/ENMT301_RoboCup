@@ -111,8 +111,8 @@
 #define IR_DISTANCE_SENSOR_PIN    A9  // Analog pin for 2Y0A02 IR distance sensor
 
 // VL53L1X sensor configuration
-const uint8_t VL53L1X_SENSOR_COUNT = 5;  // 5 tier sensors
-const uint8_t VL53L1X_XSHUT_PINS[VL53L1X_SENSOR_COUNT] = { 0, 1, 2, 3, 4};  // Update this with the XSHUT pins for each sensor
+const uint8_t VL53L1X_SENSOR_COUNT = 4;  // 4 tier sensors
+const uint8_t VL53L1X_XSHUT_PINS[VL53L1X_SENSOR_COUNT] = { 0, 1, 2, 3};  // Update this with the XSHUT pins for each sensor
 const uint8_t VL53L0X_TOP_XSHUT_EXPANDER_PIN = 4;  // SX1509 expander pin 4 for top VL53L0X sensor XSHUT
 #define VL53L0X_TOP_XSHUT_PIN 6   // Legacy: kept for reference (actual XSHUT is on expander pin 4)
 
@@ -180,7 +180,9 @@ IRDistanceSensor irDistanceSensor(IR_DISTANCE_SENSOR_PIN);
 
 // TOF Sensor Array instance (explicit SX1509 I2C address 0x3F)
 TOFSensorArray tofSensorArray(VL53L1X_SENSOR_COUNT, 0x3F);
-TieredTargetDetector targetDetector(tofSensorArray, 0, 1, 2, 3);
+// Note: TieredTargetDetector now requires the LD06 lidar instance as the
+// second parameter so it can compare TOF hits against lidar returns.
+TieredTargetDetector targetDetector(tofSensorArray, ld06, 0, 1, 2, 3);
 
 // CH9143 Bluetooth instance
 CH9143Bluetooth bluetooth(&Serial7, BLUETOOTH_RX_PIN, BLUETOOTH_TX_PIN, BLUETOOTH_BAUD);
@@ -319,7 +321,10 @@ void vl53l1x_sensor_callback(void) {
         Serial.print("\tS5:NOTINIT");
     }
 
-    targetDetector.update(topDistance);
+    // targetDetector.update() no longer takes a top sensor distance; it
+    // reads the lidar via the LD06 instance internally (the LD06 task
+    // already calls ld06.readScan()).
+    targetDetector.update();
 
     // If the DFRobot Matrix Lidar (8x8) is present, print it as 8 rows
     if (TOF_X8_isInitialized()) {
@@ -869,11 +874,10 @@ void robot_init() {
         }
     } else {
         printlnBoth("VL53L1X sensor array initialized successfully");
-        tofSensorArray.setDistanceOffset(0, 0);   // Sensor 0 offset
+        tofSensorArray.setDistanceOffset(0, -40);   // Sensor 0 offset
         tofSensorArray.setDistanceOffset(1, 0); // Sensor 1 offset
-        tofSensorArray.setDistanceOffset(2, -40);  // Sensor 2 offset
-        tofSensorArray.setDistanceOffset(3, 0);  // Sensor 3 offset
-        tofSensorArray.setDistanceOffset(4, 0);  // Sensor 4 offset
+        tofSensorArray.setDistanceOffset(2, 0);  // Sensor 2 offset
+        tofSensorArray.setDistanceOffset(3, -5);  // Sensor 3 offset
     }
 
     // Initialize top VL53L0X sensor using the integrated TOFSensorArray method
@@ -887,8 +891,18 @@ void robot_init() {
     targetConfig.nearIntersectMm = 300;
     targetConfig.farIntersectMm = 500;
     targetConfig.intersectionToleranceMm = 35;
-    targetConfig.topSensorClearanceMm = 80;
-    targetConfig.topSensorRejectMarginMm = 40;
+    // Map the prior "top sensor" semantics into the new lidar-based
+    // config: treat the old clearance/reject-margin as an expected
+    // target height and tolerance, and tighten lidar matching accordingly.
+    targetConfig.targetHeightMm = 80;
+    targetConfig.targetHeightToleranceMm = 40;
+    targetConfig.toleratedWidthMm = 50; // tolerated target lateral width (mm)
+    // Lidar matching tolerances (how closely a lidar return must match a TOF
+    // hit to be considered the same surface / an obstacle)
+    targetConfig.maxDetectionRangeMm = 800;
+    targetConfig.lidarMatchToleranceMm = 40;
+    targetConfig.lidarBearingToleranceDeg = 1.0f;
+    targetConfig.useAngleGate = false;
     targetDetector.setConfig(targetConfig);
 
     // Initialize optional DFRobot Matrix Lidar (8x8 matrix) if connected
@@ -939,11 +953,11 @@ void task_init() {
     // taskManager.addTask(tUltrasonic_sensor);  //reading ultrasonic sensor
     // taskManager.addTask(tColor_sensor);       //reading color sensor
     // taskManager.addTask(tIR_XY_Position);     //reading IR XY position sensor
-    //taskManager.addTask(tVL53L1X_sensor);     //reading VL53L1X sensors
+    taskManager.addTask(tVL53L1X_sensor);     //reading VL53L1X sensors
     //taskManager.addTask(tTOF_X8);              //reading DFRobot Matrix Lidar 8x8 (if present)
     //taskManager.addTask(tIR_Distance_sensor); //reading IR distance sensor (2Y0A02)  
     // taskManager.addTask(tSensor_average);
-     taskManager.addTask(tDC_motor);          //DC motor control
+    // taskManager.addTask(tDC_motor);          //DC motor control
   // taskManager.addTask(tSet_motor); 
   // taskManager.addTask(tWeight_scan);
   // taskManager.addTask(tCollect_weight);
