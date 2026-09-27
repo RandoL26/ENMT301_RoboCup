@@ -1,2 +1,4 @@
 .pio
-.json
+.venv
+~$*.SLDPRT
+~$*.SLDASM

@@ -229,12 +229,12 @@
                 ]
             },
             "defines": [
-                "PLATFORMIO=60119",
+                "PLATFORMIO=60200",
                 "__IMXRT1062__",
                 "ARDUINO_TEENSY40",
                 "USB_SERIAL",
                 "ARDUINO=10805",
-                "TEENSYDUINO=162",
+                "TEENSYDUINO=160",
                 "CORE_TEENSY",
                 "F_CPU=600000000",
                 "LAYOUT_US_ENGLISH",
