@@ -8,6 +8,9 @@
 
 #include "weight_collection.h"
 #include "Arduino.h"
+#include "BigServo.h"
+
+
 
 void weight_scan(/* whatever parameters */) 
 {
@@ -20,6 +23,7 @@ void weight_scan(/* whatever parameters */)
 void collect_weight()
 {
   /* When ready, collect the weight */
-   Serial.println("Collecting weight \n");
+  Serial.println("Collecting weight \n");
+  digitalWrite(ELECTROMAGNET_PIN, LOW);
 }
 
