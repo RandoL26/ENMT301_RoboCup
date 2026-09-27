@@ -1,0 +1,18 @@
+Metadata-Version: 2.4
+Name: BreezySLAM
+Version: 0.1
+Summary: Simple, efficient SLAM in Python
+Home-page: https://github.com/simondlevy/BreezySLAM
+Author: Simon D. Levy and Suraj Bajracharya
+Author-email: simon.d.levy@gmail.com
+License: LGPL
+Platform: Linux; Windows; OS X
+Dynamic: author
+Dynamic: author-email
+Dynamic: description
+Dynamic: home-page
+Dynamic: license
+Dynamic: platform
+Dynamic: summary
+
+Provides core classes Position, Map, Laser, Scan, and algorithm CoreSLAM
