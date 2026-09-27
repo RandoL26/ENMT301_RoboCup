@@ -11,7 +11,8 @@ LD06::LD06(HardwareSerial &serial, uint8_t pwmPin)
 }
 
 void LD06::init() {
-  _lidarSerial->begin(115200);
+  // LD06 typically runs at 230400; ensure serial is configured to match hardware
+  _lidarSerial->begin(230400);
   if (_pin != 255) {
     pinMode(_pin, OUTPUT);
     digitalWrite(_pin, HIGH);

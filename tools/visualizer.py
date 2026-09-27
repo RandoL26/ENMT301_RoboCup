@@ -1,33 +1,5 @@
 #!/usr/bin/env python3
-"""
-Live occupancy-grid + D* path visualizer for Teensy serial telemetry.
-
-Protocol assumptions (binary, robust framing):
-- Sync bytes: 0xA5 0x5A
-- Header (little-endian):
-    u8  version
-    u16 sequence
-    u16 payload_len
-- Payload:
-    f32 pose_x_m
-    f32 pose_y_m
-    f32 pose_theta_rad
-    u16 grid_w
-    u16 grid_h
-    u16 cell_mm
-    u16 path_count
-    grid_packed[(grid_w*grid_h+1)//2]  # two cells per byte
-      nibble bits: [1:0]=occupancy (0 unknown,1 free,2 occupied), [3:2]=terrain (0 flat,1 ramp,2 speed bump)
-    path[path_count] where each waypoint is:
-      u8 cx
-      u8 cy
-- Footer:
-    u16 crc16_ccitt (computed over: version..payload_end, NOT including sync)
-
-Notes:
-- This parser tolerates noise/partial frames by scanning for sync and CRC-checking each candidate frame.
-- If serial disconnects, it retries automatically.
-"""
+"""Visualiser for Teensy mapping telemetry (binary framed protocol 0xA5 0x5A)."""
 
 from __future__ import annotations
 
@@ -149,6 +121,9 @@ class TelemetryState:
     dropped_frames: int = 0
     # Optional latest lidar scan points as Nx2 array (angle_rad, distance_m)
     lidar_points: Optional[np.ndarray] = None
+    # Scan counters
+    scan_packet_count: int = 0
+    scan_point_count: int = 0
 
 
 @dataclass
@@ -316,13 +291,18 @@ class TelemetryReconstructor:
         return True
 
     def _apply_heartbeat(self, payload: bytes) -> bool:
-        if len(payload) < HEARTBEAT_SIZE:
-            return False
-        uptime_ms, tx_queue_depth, dropped_frames = struct.unpack_from(HEARTBEAT_FMT, payload, 0)
-        self.state.uptime_ms = int(uptime_ms)
-        self.state.tx_queue_depth = int(tx_queue_depth)
-        self.state.dropped_frames = int(dropped_frames)
-        return True
+            if len(payload) < HEARTBEAT_SIZE:
+                return False
+            uptime_ms, tx_queue_depth, dropped_frames = struct.unpack_from(HEARTBEAT_FMT, payload, 0)
+            self.state.uptime_ms = int(uptime_ms)
+            self.state.tx_queue_depth = int(tx_queue_depth)
+            self.state.dropped_frames = int(dropped_frames)
+            # Optional extended fields: scan_packet_count (u16), scan_point_count (u16)
+            if len(payload) >= HEARTBEAT_SIZE + 4:
+                scan_pkt, scan_pts = struct.unpack_from('<HH', payload, HEARTBEAT_SIZE)
+                self.state.scan_packet_count = int(scan_pkt)
+                self.state.scan_point_count = int(scan_pts)
+            return True
 
     def _apply_scan(self, payload: bytes) -> bool:
         if len(payload) < SCAN_META_SIZE:
@@ -337,7 +317,10 @@ class TelemetryReconstructor:
         if arr.size != point_count * 2:
             return False
         pts = arr.reshape((-1, 2)).copy()
+        # update lidar points and counters
         self.state.lidar_points = pts
+        self.state.scan_packet_count = getattr(self.state, 'scan_packet_count', 0) + 1
+        self.state.scan_point_count = pts.shape[0]
         return True
 
 
@@ -401,6 +384,8 @@ class SerialWorker(threading.Thread):
             tx_queue_depth=state.tx_queue_depth,
             dropped_frames=state.dropped_frames,
             lidar_points=None if state.lidar_points is None else state.lidar_points.copy(),
+            scan_packet_count=getattr(state, 'scan_packet_count', 0),
+            scan_point_count=getattr(state, 'scan_point_count', 0),
         )
 
         try:
@@ -466,9 +451,8 @@ class LiveVisualizer:
 
     @staticmethod
     def grid_to_rgb(occupancy: np.ndarray, terrain: np.ndarray) -> np.ndarray:
-        # Rotate 90 degrees counterclockwise to match robot's orientation
-        occupancy = np.rot90(occupancy)
-        terrain = np.rot90(terrain)
+        # occupancy and terrain are (grid_h, grid_w) with (0,0)=bottom-left.
+        # imshow uses origin='lower' so no rotation is required here.
         
         h, w = occupancy.shape
         rgb = np.zeros((h, w, 3), dtype=np.uint8)
@@ -519,7 +503,9 @@ class LiveVisualizer:
             f"theta: {state.pose_theta_rad:.3f} rad ({theta_deg:.1f} deg)\n"
             f"uptime: {state.uptime_ms} ms\n"
             f"tx_queue: {state.tx_queue_depth}\n"
-            f"drops: {state.dropped_frames}"
+            f"drops: {state.dropped_frames}\n"
+            f"SCAN PKTS: {state.scan_packet_count}\n"
+            f"SCAN PTS: {state.scan_point_count}"
         )
 
         # Update trail

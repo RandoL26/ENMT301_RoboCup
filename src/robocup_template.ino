@@ -42,6 +42,13 @@
 #include "ld06.h"                   // LD06 LiDAR
 #include "BigServo.h"               // Big servo
 #include "RoboSLAM.h"
+#include "telemetry.h"
+
+// Gate legacy ASCII Teleplot / diagnostic prints so they don't corrupt
+// the framed binary telemetry stream. Set to 1 to allow ASCII debug.
+#ifndef TELEMETRY_ALLOW_ASCII_TELEPLOT
+#define TELEMETRY_ALLOW_ASCII_TELEPLOT 0
+#endif
 
 
 //**********************************************************************************
@@ -270,9 +277,25 @@ void ld06_lidar_callback(void) {
     // Read lidar and, when a full scan is ready, emit Teleplot-format points
     bool scanReady = ld06.readScan();
     if (scanReady) {
+        // increment diagnostic: readScan() returned true
+        scan_ready_count++;
+    }
+    if (scanReady) {
         // Feed on-board RoboSLAM then also emit Teleplot for external tools if needed
         roboSlam.processScan(ld06, current_imu_data);
+        // Diagnostic print: number of points available for telemetry
+
+        // Emit a downsampled scan for the visualizer (non-blocking, small)
+        // increment diagnostic: about to call telemetry send
+        scan_telemetry_call_count++;
+        last_scan_point_count = ld06.getNbPointsInScan();
+        telemetry_send_downsampled_scan(ld06, mappingNav, 48);
+#if TELEMETRY_ALLOW_ASCII_TELEPLOT
+        Serial.print("TELEM SCAN POINTS=");
+        Serial.println(ld06.getNbPointsInScan());
+        // Keep Teleplot for backwards compatibility
         ld06.printScanTeleplot(Serial);
+#endif
     }
 }
 
@@ -830,6 +853,10 @@ void robot_init() {
         
         printlnBoth("Initialising DC Motor...");
         driveMotor.begin();
+        // Initialize RoboSLAM baseline (read initial encoder/flow/imu state)
+        roboSlam.begin();
+        // Initialize telemetry over USB Serial
+        telemetry_init(Serial);
         
         printlnBoth("Robot is ready \n");
     } else {
@@ -917,6 +944,32 @@ void loop() {
     process_usb_motor_commands();
 
     taskManager.execute();    //execute the scheduler
-  //Serial.println("Another scheduler execution cycle has oocured \n");
+    // Periodic telemetry: heartbeat(1s), pose/path(200ms), grid keyframe(1500ms)
+    static unsigned long last_hb_ms = 0;
+    static unsigned long last_pose_ms = 0;
+    static unsigned long last_grid_ms = 0;
+    unsigned long now = millis();
+    if (now - last_hb_ms >= 1000) {
+        telemetry_send_heartbeat(now, 0, 0);
+        // Send temporary diagnostic packet with scan counters (avoid ASCII on binary stream)
+        telemetry_send_diag_scan();
+        // Also optionally print ASCII diagnostics to Serial when allowed (may corrupt binary stream)
+#if TELEMETRY_ALLOW_ASCII_TELEPLOT
+        Serial.printf("DIAG SCAN ready=%lu call=%lu sent=%lu pts=%u\n",
+                      (unsigned long)scan_ready_count,
+                      (unsigned long)scan_telemetry_call_count,
+                      (unsigned long)scan_telemetry_sent_count,
+                      (unsigned int)last_scan_point_count);
+#endif
+        last_hb_ms = now;
+    }
+    if (now - last_pose_ms >= 200) {
+        telemetry_send_pose_and_path(mappingNav);
+        last_pose_ms = now;
+    }
+    if (now - last_grid_ms >= 1500) {
+        telemetry_send_grid_keyframe(mappingNav);
+        last_grid_ms = now;
+    }
 }
 
