@@ -100,24 +100,6 @@ This script keeps the full grid reconstructed on the PC side from a keyframe plu
 It also ignores malformed frames and retries serial disconnects automatically.
 """
 
-from __future__ import annotations
-
-import argparse
-import struct
-import threading
-import time
-from dataclasses import dataclass
-from queue import Queue, Empty, Full
-from typing import Optional
-
-import numpy as np
-import serial
-import serial.tools.list_ports
-
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
-
-
 SYNC0 = 0xA5
 SYNC1 = 0x5A
 VERSION = 1
@@ -484,11 +466,16 @@ class LiveVisualizer:
 
     @staticmethod
     def grid_to_rgb(occupancy: np.ndarray, terrain: np.ndarray) -> np.ndarray:
+        # Rotate 90 degrees counterclockwise to match robot's orientation
+        occupancy = np.rot90(occupancy)
+        terrain = np.rot90(terrain)
+        
         h, w = occupancy.shape
         rgb = np.zeros((h, w, 3), dtype=np.uint8)
-        rgb[occupancy == 0] = (90, 90, 90)
-        rgb[occupancy == 1] = (220, 220, 220)
-        rgb[occupancy == 2] = (140, 25, 25)
+        # 0=unknown (gray), 1=free space (white), 2=occupied (dark red/black)
+        rgb[occupancy == 0] = (90, 90, 90)      # Unknown: gray
+        rgb[occupancy == 1] = (220, 220, 220)   # Free: white
+        rgb[occupancy == 2] = (20, 20, 20)      # Occupied: black
 
         ramp_mask = terrain == 1
         bump_mask = terrain == 2
