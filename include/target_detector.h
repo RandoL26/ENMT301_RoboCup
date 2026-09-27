@@ -74,7 +74,7 @@ struct TieredTargetDetectorConfig {
     uint16_t targetHeightMm = 70;
     uint16_t targetHeightToleranceMm = 20;
     uint16_t toleratedWidthMm = 50;
-    uint16_t intersectionToleranceMm = 50;
+    uint16_t intersectionToleranceMm = 75;
 
     // --- TOF <-> lidar comparison (replaces the old top-sensor fields) ---
     uint16_t maxDetectionRangeMm = 600;    // hard cap: ignore TOF readings beyond this
