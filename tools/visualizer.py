@@ -45,6 +45,7 @@ import serial.tools.list_ports
 
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
+import matplotlib.patches as patches
 
 
 SYNC0 = 0xA5
@@ -129,6 +130,7 @@ PACKET_POSE_PATH = 0x01
 PACKET_GRID_KEYFRAME = 0x02
 PACKET_GRID_DELTA = 0x03
 PACKET_HEARTBEAT = 0x04
+PACKET_SCAN = 0x05
 
 POSE_FMT = "<fffH"
 POSE_SIZE = struct.calcsize(POSE_FMT)
@@ -138,6 +140,8 @@ DELTA_META_FMT = "<H"
 DELTA_META_SIZE = struct.calcsize(DELTA_META_FMT)
 HEARTBEAT_FMT = "<IHH"
 HEARTBEAT_SIZE = struct.calcsize(HEARTBEAT_FMT)
+SCAN_META_FMT = "<H"  # point_count
+SCAN_META_SIZE = struct.calcsize(SCAN_META_FMT)
 
 DEFAULT_GRID_W = 48
 DEFAULT_GRID_H = 98
@@ -161,6 +165,8 @@ class TelemetryState:
     uptime_ms: int = 0
     tx_queue_depth: int = 0
     dropped_frames: int = 0
+    # Optional latest lidar scan points as Nx2 array (angle_rad, distance_m)
+    lidar_points: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -257,6 +263,8 @@ class TelemetryReconstructor:
             return self._apply_delta(packet.payload)
         if packet.packet_type == PACKET_HEARTBEAT:
             return self._apply_heartbeat(packet.payload)
+        if packet.packet_type == PACKET_SCAN:
+            return self._apply_scan(packet.payload)
 
         return False
 
@@ -334,6 +342,22 @@ class TelemetryReconstructor:
         self.state.dropped_frames = int(dropped_frames)
         return True
 
+    def _apply_scan(self, payload: bytes) -> bool:
+        if len(payload) < SCAN_META_SIZE:
+            return False
+        point_count = struct.unpack_from(SCAN_META_FMT, payload, 0)[0]
+        off = SCAN_META_SIZE
+        expected = off + point_count * 8
+        if len(payload) < expected:
+            return False
+
+        arr = np.frombuffer(payload[off:expected], dtype=np.float32)
+        if arr.size != point_count * 2:
+            return False
+        pts = arr.reshape((-1, 2)).copy()
+        self.state.lidar_points = pts
+        return True
+
 
 class SerialWorker(threading.Thread):
     def __init__(self, port: str, baud: int, out_q: Queue, timeout_s: float = 0.1) -> None:
@@ -394,6 +418,7 @@ class SerialWorker(threading.Thread):
             uptime_ms=state.uptime_ms,
             tx_queue_depth=state.tx_queue_depth,
             dropped_frames=state.dropped_frames,
+            lidar_points=None if state.lidar_points is None else state.lidar_points.copy(),
         )
 
         try:
@@ -430,6 +455,14 @@ class LiveVisualizer:
         self.robot_dot, = self.ax.plot([], [], marker="o", color="cyan", markersize=6)
         self.heading_line, = self.ax.plot([], [], color="cyan", linewidth=2)
         self.path_line, = self.ax.plot([], [], color="magenta", linewidth=2)
+        self.trail_line, = self.ax.plot([], [], color="yellow", linewidth=1)
+        self.scan_scatter = self.ax.scatter([], [], s=6, c="yellow", alpha=0.8)
+        # Confidence indicator (circle patch)
+        self.conf_patch = patches.Circle((0.95, 0.05), 0.03, transform=self.ax.transAxes, facecolor="green", edgecolor="black", zorder=10)
+        self.ax.add_patch(self.conf_patch)
+        # Arena boundary (Rectangle patch) — updated when grid meta arrives
+        self.arena_rect = patches.Rectangle((0, 0), DEFAULT_ARENA_W_M, DEFAULT_ARENA_H_M, fill=False, edgecolor="white", linewidth=2)
+        self.ax.add_patch(self.arena_rect)
         self.info_text = self.ax.text(
             0.02,
             0.98,
@@ -444,6 +477,10 @@ class LiveVisualizer:
 
         self.ax.set_aspect("equal", adjustable="box")
         self.ax.grid(True, alpha=0.2)
+
+        # Maintain a short trail of past poses
+        self._trail = []
+        self._trail_max = 200
 
     @staticmethod
     def grid_to_rgb(occupancy: np.ndarray, terrain: np.ndarray) -> np.ndarray:
@@ -498,6 +535,42 @@ class LiveVisualizer:
             f"drops: {state.dropped_frames}"
         )
 
+        # Update trail
+        self._trail.append((state.pose_x_m, state.pose_y_m))
+        if len(self._trail) > self._trail_max:
+            self._trail.pop(0)
+        tx = [p[0] for p in self._trail]
+        ty = [p[1] for p in self._trail]
+        self.trail_line.set_data(tx, ty)
+
+        # Update scan scatter if present (angles,distances -> xy around robot)
+        if state.lidar_points is not None and state.lidar_points.size > 0:
+            angles = state.lidar_points[:, 0]
+            dists = state.lidar_points[:, 1]
+            xs = state.pose_x_m + dists * np.cos(angles + state.pose_theta_rad)
+            ys = state.pose_y_m + dists * np.sin(angles + state.pose_theta_rad)
+            self.scan_scatter.set_offsets(np.vstack((xs, ys)).T)
+        else:
+            self.scan_scatter.set_offsets(np.empty((0, 2)))
+
+        # Confidence indicator: simple heuristic (lower is better)
+        conf = 1.0 - min(1.0, (state.dropped_frames / 200.0) + (state.tx_queue_depth / 200.0))
+        # map to color
+        if conf > 0.66:
+            col = "green"
+        elif conf > 0.33:
+            col = "orange"
+        else:
+            col = "red"
+        self.conf_patch.set_facecolor(col)
+
+        # Update arena rectangle to match grid extents
+        cell_m = state.cell_mm / 1000.0
+        width_m = state.grid_w * cell_m
+        height_m = state.grid_h * cell_m
+        self.arena_rect.set_width(width_m)
+        self.arena_rect.set_height(height_m)
+
     def animate(self, q: Queue) -> FuncAnimation:
         interval_ms = int(1000.0 / self.fps)
 
@@ -510,7 +583,7 @@ class LiveVisualizer:
                     break
             if latest is not None:
                 self.update_state(latest)
-            return self.img, self.robot_dot, self.heading_line, self.path_line, self.info_text
+            return self.img, self.robot_dot, self.heading_line, self.path_line, self.info_text, self.trail_line, self.scan_scatter
 
         return FuncAnimation(self.fig, tick, interval=interval_ms, blit=False)
 

@@ -11,7 +11,7 @@ LD06::LD06(HardwareSerial &serial, uint8_t pwmPin)
 }
 
 void LD06::init() {
-  _lidarSerial->begin(230400);
+  _lidarSerial->begin(115200);
   if (_pin != 255) {
     pinMode(_pin, OUTPUT);
     digitalWrite(_pin, HIGH);
@@ -30,29 +30,64 @@ bool LD06::readData() {
 */
 bool LD06::readDataCRC() {
   bool result = false;
+
   while (_lidarSerial->available()) {
     uint8_t current = _lidarSerial->read();
-    if (_receivedData.index > 1 || (_receivedData.index == 0 && current == LD06_HEADER) || (_receivedData.index == 1 && current == LD06_VER_SIZE)) {
-      _receivedData.packet.bytes[_receivedData.index] = current;
-      if (_receivedData.index < LD06_PACKET_SIZE - 1) {
-        _receivedData.computedCrc = CrcTable[_receivedData.computedCrc ^ current];
-        _receivedData.index++;
+
+    // Synchronise to packet header: 0x54 0x2C
+    if (_receivedData.index == 0) {
+      if (current == LD06_HEADER) {
+        _receivedData.packet.bytes[0] = current;
+        _receivedData.index = 1;
+        _receivedData.computedCrc = CrcTable[current];
+      }
+      continue;
+    }
+
+    if (_receivedData.index == 1) {
+      if (current == LD06_VER_SIZE) {
+        _receivedData.packet.bytes[1] = current;
+        _receivedData.index = 2;
+        _receivedData.computedCrc =
+            CrcTable[_receivedData.computedCrc ^ current];
       } else {
-        if (_receivedData.computedCrc == current) {
-          _previousPacket = _receivedData.packet;
-          computeData();
-          result = true;
-        } else {
-          _checksumFailCount++;  // CRC error counter
-        }
+        // Current byte might itself be a new packet header
         _receivedData.index = 0;
         _receivedData.computedCrc = 0;
+
+        if (current == LD06_HEADER) {
+          _receivedData.packet.bytes[0] = current;
+          _receivedData.index = 1;
+          _receivedData.computedCrc = CrcTable[current];
+        }
       }
+      continue;
+    }
+
+    // Collect packet bytes
+    _receivedData.packet.bytes[_receivedData.index] = current;
+
+    if (_receivedData.index < LD06_PACKET_SIZE - 1) {
+      _receivedData.computedCrc =
+          CrcTable[_receivedData.computedCrc ^ current];
+
+      _receivedData.index++;
     } else {
+      // Last byte is the received CRC
+      if (_receivedData.computedCrc == current) {
+        _previousPacket = _receivedData.packet;
+        computeData();
+        result = true;
+      } else {
+        _checksumFailCount++;
+      }
+
+      // Reset for next packet
       _receivedData.index = 0;
       _receivedData.computedCrc = 0;
     }
   }
+
   return result;
 }
 
@@ -107,12 +142,14 @@ void LD06::computeData() {
     return;
   }
 
-  int8_t reverse = (_upsideDown ? -1 : 1);
-
   float fsa = _receivedData.packet.startAngle / 100.0f;
+
+  (void)fsa; // no debug prints in normal operation
 
   DataPoint data;
 
+  float firstPhysAngle = 0.0f;
+  float lastPhysAnglePacket = 0.0f;
   for (uint16_t i = 0; i < LD06_PTS_PER_PACKETS; i++) {
 
     float physAngle = fsa + (i + 0.5f) * angleStep;
@@ -134,6 +171,9 @@ void LD06::computeData() {
       startPhysAngle = physAngle;
     }
     lastPhysAngle = physAngle;
+
+    if (i == 0) firstPhysAngle = physAngle;
+    if (i == LD06_PTS_PER_PACKETS - 1) lastPhysAnglePacket = physAngle;
 
 
     float angle;

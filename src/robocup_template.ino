@@ -41,6 +41,7 @@
 #include "optical_flow.h"           // PMW3901 optical flow (Bitcraze)
 #include "ld06.h"                   // LD06 LiDAR
 #include "BigServo.h"               // Big servo
+#include "RoboSLAM.h"
 
 
 //**********************************************************************************
@@ -73,7 +74,7 @@
 #define OF_READ_TASK_PERIOD                 40
 #define OF_READ_TASK_NUM_EXECUTE            -1
 
-#define LD06_READ_TASK_PERIOD               50
+#define LD06_READ_TASK_PERIOD               1
 #define LD06_READ_TASK_NUM_EXECUTE          -1
 
 #define HERKULEX_TEST_PERIOD               1200
@@ -164,6 +165,10 @@ OpticalFlow opticalFlow(10);
 
 // LD06 LiDAR on Serial2 (UART @ 230400 configured in ld06.init())
 LD06 ld06(Serial2);
+
+// Mapping and on-board SLAM
+MappingNav mappingNav;
+RoboSLAM roboSlam(mappingNav, driveMotor, opticalFlow);
 
 // Ultrasonic Sensor instance (kept for backwards compatibility)
 // UltrasonicSensor ultrasonicSensor(ULTRASONIC_TRIGGER_PIN_1, ULTRASONIC_ECHO_PIN_1);
@@ -262,29 +267,12 @@ void optical_flow_callback(void) {
 
 // Task wrapper for LD06 LiDAR reading
 void ld06_lidar_callback(void) {
-    int uart2AvailBefore = Serial2.available();
-
-    // Same usage as Basic.ino: when a full scan is ready, stream Teleplot format.
+    // Read lidar and, when a full scan is ready, emit Teleplot-format points
     bool scanReady = ld06.readScan();
     if (scanReady) {
+        // Feed on-board RoboSLAM then also emit Teleplot for external tools if needed
+        roboSlam.processScan(ld06, current_imu_data);
         ld06.printScanTeleplot(Serial);
-    }
-
-    // Lightweight diagnostics once per second (helps verify UART traffic/CRC/scan state)
-    static uint32_t lastDiagMs = 0;
-    uint32_t now = millis();
-    if (now - lastDiagMs >= 1000) {
-        lastDiagMs = now;
-        static uint16_t prevCrcFail = 0;
-        uint16_t crcFail = ld06.getChecksumFailCount();
-        uint16_t crcDelta = crcFail - prevCrcFail;
-        prevCrcFail = crcFail;
-
-        // Print lightweight diagnostics so we can see if Serial2 is receiving data
-        int uart2AvailAfter = Serial2.available();
-        printfBoth("LD06 diag: uart2_avail_before=%d after=%d crc_fail_total=%u crc_fail_delta=%u scanReady=%s\n",
-               uart2AvailBefore, uart2AvailAfter, (unsigned int)crcFail, (unsigned int)crcDelta, scanReady ? "YES" : "NO");
-        
     }
 }
 
@@ -793,8 +781,11 @@ void robot_init() {
 
     printlnBoth("Initialising LD06 LiDAR on Serial2...");
     ld06.init();
+    // Re-enable CRC for normal operation; enable full-scan so
+    // `readScan()` reports when a full 360° scan completes.
+    ld06.enableCRC();
     ld06.enableFullScan();
-    printlnBoth("LD06 LiDAR initialized");
+    printlnBoth("LD06 LiDAR initialized (CRC enabled, full-scan enabled)");
 
     printlnBoth("Initialising IR Distance Sensor (2Y0A02)...");
     irDistanceSensor.begin();
@@ -859,7 +850,7 @@ void task_init() {
   // taskManager.addTask(tRead_infrared);
   // taskManager.addTask(tRead_colour);
   taskManager.addTask(tRead_imu);          //reading IMU
-    taskManager.addTask(tProximity_sensor);  //reading proximity sensor
+    // taskManager.addTask(tProximity_sensor);  //reading proximity sensor
     // taskManager.addTask(tUltrasonic_sensor);  //reading ultrasonic sensor
     // taskManager.addTask(tColor_sensor);       //reading color sensor
     // taskManager.addTask(tIR_XY_Position);     //reading IR XY position sensor
