@@ -219,133 +219,9 @@ void telemetry_send_downsampled_scan(LD06 &ld06, const MappingNav &nav, uint16_t
       dists[i] = ((float)pt->distance) / 1000.0f;
     }
   }
-
-  // Compute per-scan diagnostics from the raw scan (before downsampling)
-  uint16_t zero_count = 0;
-  uint16_t invalid_count = 0;
-  uint16_t min_mm = 0;
-  uint16_t max_mm = 0;
-  uint16_t large_jump_count = 0;
-  const uint16_t VALID_MIN_MM = 1;
-  const uint16_t VALID_MAX_MM = 12000;
-  bool first_valid = true;
-  for (uint16_t i = 0; i < nb; ++i) {
-    uint32_t dmm = (uint32_t)(dists[i] * 1000.0f + 0.5f);
-    if (dmm == 0) {
-      ++zero_count;
-      continue;
-    }
-    if (dmm < VALID_MIN_MM || dmm > VALID_MAX_MM) {
-      ++invalid_count;
-      continue;
-    }
-    if (first_valid) {
-      min_mm = (uint16_t)dmm;
-      max_mm = (uint16_t)dmm;
-      first_valid = false;
-    } else {
-      if ((uint16_t)dmm < min_mm) min_mm = (uint16_t)dmm;
-      if ((uint16_t)dmm > max_mm) max_mm = (uint16_t)dmm;
-    }
-    // large jump vs previous scan same index
-    if (g_prev_scan_nb > 0 && i < g_prev_scan_nb) {
-      float prev = g_prev_scan_dists[i];
-      if (prev > 0.0f) {
-        float diff_m = fabsf(dists[i] - prev);
-        if (diff_m > 0.05f) ++large_jump_count; // >50mm
-      }
-    }
-  }
-
-  // ANGLE-MATCHING DIAGNOSTICS: compare current scan to previous scan by ANGLE
-  // For each valid current beam, find nearest previous beam by angular distance
-  uint16_t matched_count = 0;
-  float max_delta_m = 0.0f;
-  uint16_t cnt_gt_100 = 0;
-  uint16_t cnt_gt_500 = 0;
-  uint16_t cnt_gt_1000 = 0;
-  float angle_of_max_delta_rad = 0.0f;
-  // collect angle diffs (deg) for stats
-  float ang_diff_sum = 0.0f;
-  float ang_diff_sq_sum = 0.0f;
-  uint16_t ang_diff_n = 0;
-  const float RAD_TO_DEG_F = 180.0f / PI;
-  if (g_prev_scan_nb > 0) {
-    for (uint16_t i = 0; i < nb; ++i) {
-      uint32_t curr_mm = (uint32_t)(dists[i] * 1000.0f + 0.5f);
-      if (curr_mm == 0) continue;
-      if (curr_mm < VALID_MIN_MM || curr_mm > VALID_MAX_MM) continue;
-      // find nearest previous angle
-      uint16_t best_j = 0;
-      float best_ang_diff = 1e9f;
-      for (uint16_t j = 0; j < g_prev_scan_nb; ++j) {
-        float d_ang = fabsf(angles[i] - g_prev_scan_angles[j]);
-        if (d_ang > PI) d_ang = 2.0f * PI - d_ang;
-        if (d_ang < best_ang_diff) { best_ang_diff = d_ang; best_j = j; }
-      }
-      // get previous distance for best_j
-      uint32_t prev_mm = (uint32_t)(g_prev_scan_dists[best_j] * 1000.0f + 0.5f);
-      if (prev_mm == 0) continue;
-      if (prev_mm < VALID_MIN_MM || prev_mm > VALID_MAX_MM) continue;
-      uint32_t delta_mm = (curr_mm > prev_mm) ? (curr_mm - prev_mm) : (prev_mm - curr_mm);
-      ++matched_count;
-      if ((float)delta_mm / 1000.0f > max_delta_m) {
-        max_delta_m = (float)delta_mm / 1000.0f;
-        angle_of_max_delta_rad = angles[i];
-      }
-      if (delta_mm > 100) ++cnt_gt_100;
-      if (delta_mm > 500) ++cnt_gt_500;
-      if (delta_mm > 1000) ++cnt_gt_1000;
-      // angle diff stats (degrees)
-      float ad = best_ang_diff * RAD_TO_DEG_F;
-      ang_diff_sum += ad;
-      ang_diff_sq_sum += ad * ad;
-      ++ang_diff_n;
-    }
-  }
-
-  // store into globals (capping where appropriate)
-  g_ld_matched_count = (uint16_t)matched_count;
-  uint32_t max_delta_mm_u32 = (uint32_t)(max_delta_m * 1000.0f + 0.5f);
-  if (max_delta_mm_u32 > 0xFFFF) max_delta_mm_u32 = 0xFFFF;
-  g_ld_max_delta_mm = (uint16_t)max_delta_mm_u32;
-  g_ld_count_delta_gt_100 = cnt_gt_100;
-  g_ld_count_delta_gt_500 = cnt_gt_500;
-  g_ld_count_delta_gt_1000 = cnt_gt_1000;
-  // angles: map to 0..360 and store centi-degrees
-  float angle_deg = fmodf((angle_of_max_delta_rad * RAD_TO_DEG_F) + 360.0f, 360.0f);
-  uint32_t angle_cdeg = (uint32_t)(angle_deg * 100.0f + 0.5f);
-  if (angle_cdeg > 0xFFFF) angle_cdeg = 0xFFFF;
-  g_ld_angle_of_max_delta_cdeg = (uint16_t)angle_cdeg;
-  if (ang_diff_n > 0) {
-    float mean = ang_diff_sum / (float)ang_diff_n;
-    float var = (ang_diff_sq_sum / (float)ang_diff_n) - (mean * mean);
-    if (var < 0.0f) var = 0.0f;
-    float std = sqrtf(var);
-    uint32_t mean_cdeg = (uint32_t)(mean * 100.0f + 0.5f);
-    uint32_t std_cdeg = (uint32_t)(std * 100.0f + 0.5f);
-    if (mean_cdeg > 0xFFFF) mean_cdeg = 0xFFFF;
-    if (std_cdeg > 0xFFFF) std_cdeg = 0xFFFF;
-    g_ld_angle_diff_mean_cdeg = (uint16_t)mean_cdeg;
-    g_ld_angle_diff_std_cdeg = (uint16_t)std_cdeg;
-  } else {
-    g_ld_angle_diff_mean_cdeg = 0;
-    g_ld_angle_diff_std_cdeg = 0;
-  }
-
-  // Save current scan distances for next scan comparison
-  for (uint16_t i = 0; i < nb && i < LD06_MAX_PTS_SCAN; ++i) {
-    g_prev_scan_dists[i] = dists[i];
-    g_prev_scan_angles[i] = angles[i];
-  }
-  g_prev_scan_nb = nb;
-
-  // Update global counters used by heartbeat diagnostics
-  g_ld_zero_count = zero_count;
-  g_ld_invalid_count = invalid_count;
-  g_ld_min_distance_mm = min_mm;
-  g_ld_max_distance_mm = max_mm;
-  g_ld_large_jump_count = large_jump_count;
+  // Diagnostics are computed once per completed raw scan by
+  // `telemetry_update_ld06_diagnostics()` called from the LD06 driver.
+  // Here we simply reuse the last-computed LD06 diagnostics globals.
   // point_count u16
   *ptr++ = (uint8_t)(pcount & 0xFF); *ptr++ = (uint8_t)((pcount >> 8) & 0xFF);
   // Reuse the `angles`/`dists` arrays populated above (no need to re-read points)
@@ -463,4 +339,108 @@ void telemetry_send_diag_scan() {
   payload[61] = 0; // padding
 
   send_frame(1, 0x06, payload, payload_len);
+}
+
+// Compute and store LD06 per-scan diagnostics from a completed raw scan.
+// This function is intentionally called once per completed raw scan by the
+// LD06 driver to avoid doing expensive work in the high-frequency telemetry
+// send path.
+void telemetry_update_ld06_diagnostics(struct DataPointHandler *scan) {
+  if (!scan) return;
+  uint16_t nb = scan->index;
+
+  // Build temporary arrays of angles (rad) and distances (m)
+  float angles[LD06_MAX_PTS_SCAN];
+  float dists[LD06_MAX_PTS_SCAN];
+  for (uint16_t i = 0; i < nb && i < LD06_MAX_PTS_SCAN; ++i) {
+    angles[i] = (scan->points[i].angle) * (PI / 180.0f);
+    dists[i] = ((float)scan->points[i].distance) / 1000.0f;
+  }
+
+  // Compute simple range counters
+  const uint16_t VALID_MIN_MM = 1;
+  const uint16_t VALID_MAX_MM = 12000;
+  uint16_t zero_count = 0;
+  uint16_t invalid_count = 0;
+  uint16_t min_mm = 0;
+  uint16_t max_mm = 0;
+  uint16_t large_jump_count = 0;
+  bool first_valid = true;
+  for (uint16_t i = 0; i < nb; ++i) {
+    uint32_t dmm = (uint32_t)(dists[i] * 1000.0f + 0.5f);
+    if (dmm == 0) { ++zero_count; continue; }
+    if (dmm < VALID_MIN_MM || dmm > VALID_MAX_MM) { ++invalid_count; continue; }
+    if (first_valid) { min_mm = (uint16_t)dmm; max_mm = (uint16_t)dmm; first_valid = false; }
+    else { if ((uint16_t)dmm < min_mm) min_mm = (uint16_t)dmm; if ((uint16_t)dmm > max_mm) max_mm = (uint16_t)dmm; }
+    // Compare to previous scan at same index
+    if (g_prev_scan_nb > 0 && i < g_prev_scan_nb) {
+      float prev = g_prev_scan_dists[i];
+      if (prev > 0.0f) {
+        float diff_m = fabsf(dists[i] - prev);
+        if (diff_m > 0.05f) ++large_jump_count;
+      }
+    }
+  }
+
+  // Angle-matching diagnostics (compare by angle to previous scan)
+  uint16_t matched_count = 0;
+  float max_delta_m = 0.0f;
+  uint16_t cnt_gt_100 = 0;
+  uint16_t cnt_gt_500 = 0;
+  uint16_t cnt_gt_1000 = 0;
+  float angle_of_max_delta_rad = 0.0f;
+  float ang_diff_sum = 0.0f;
+  float ang_diff_sq_sum = 0.0f;
+  uint16_t ang_diff_n = 0;
+  const float RAD_TO_DEG_F = 180.0f / PI;
+  if (g_prev_scan_nb > 0) {
+    for (uint16_t i = 0; i < nb; ++i) {
+      uint32_t curr_mm = (uint32_t)(dists[i] * 1000.0f + 0.5f);
+      if (curr_mm == 0) continue;
+      if (curr_mm < VALID_MIN_MM || curr_mm > VALID_MAX_MM) continue;
+      // find nearest previous angle (linear search, ok for <=1200)
+      uint16_t best_j = 0; float best_ang_diff = 1e9f;
+      for (uint16_t j = 0; j < g_prev_scan_nb; ++j) {
+        float d_ang = fabsf(angles[i] - g_prev_scan_angles[j]);
+        if (d_ang > PI) d_ang = 2.0f * PI - d_ang;
+        if (d_ang < best_ang_diff) { best_ang_diff = d_ang; best_j = j; }
+      }
+      uint32_t prev_mm = (uint32_t)(g_prev_scan_dists[best_j] * 1000.0f + 0.5f);
+      if (prev_mm == 0) continue;
+      if (prev_mm < VALID_MIN_MM || prev_mm > VALID_MAX_MM) continue;
+      uint32_t delta_mm = (curr_mm > prev_mm) ? (curr_mm - prev_mm) : (prev_mm - curr_mm);
+      ++matched_count;
+      if ((float)delta_mm / 1000.0f > max_delta_m) { max_delta_m = (float)delta_mm / 1000.0f; angle_of_max_delta_rad = angles[i]; }
+      if (delta_mm > 100) ++cnt_gt_100; if (delta_mm > 500) ++cnt_gt_500; if (delta_mm > 1000) ++cnt_gt_1000;
+      float ad = best_ang_diff * RAD_TO_DEG_F; ang_diff_sum += ad; ang_diff_sq_sum += ad * ad; ++ang_diff_n;
+    }
+  }
+
+  // Store results into telemetry globals (capped appropriately)
+  g_ld_matched_count = (uint16_t)matched_count;
+  uint32_t max_delta_mm_u32 = (uint32_t)(max_delta_m * 1000.0f + 0.5f);
+  if (max_delta_mm_u32 > 0xFFFF) max_delta_mm_u32 = 0xFFFF;
+  g_ld_max_delta_mm = (uint16_t)max_delta_mm_u32;
+  g_ld_count_delta_gt_100 = cnt_gt_100; g_ld_count_delta_gt_500 = cnt_gt_500; g_ld_count_delta_gt_1000 = cnt_gt_1000;
+  float angle_deg = fmodf((angle_of_max_delta_rad * RAD_TO_DEG_F) + 360.0f, 360.0f);
+  uint32_t angle_cdeg = (uint32_t)(angle_deg * 100.0f + 0.5f); if (angle_cdeg > 0xFFFF) angle_cdeg = 0xFFFF;
+  g_ld_angle_of_max_delta_cdeg = (uint16_t)angle_cdeg;
+  if (ang_diff_n > 0) {
+    float mean = ang_diff_sum / (float)ang_diff_n; float var = (ang_diff_sq_sum / (float)ang_diff_n) - (mean * mean);
+    if (var < 0.0f) var = 0.0f; float std = sqrtf(var);
+    uint32_t mean_cdeg = (uint32_t)(mean * 100.0f + 0.5f); uint32_t std_cdeg = (uint32_t)(std * 100.0f + 0.5f);
+    if (mean_cdeg > 0xFFFF) mean_cdeg = 0xFFFF; if (std_cdeg > 0xFFFF) std_cdeg = 0xFFFF;
+    g_ld_angle_diff_mean_cdeg = (uint16_t)mean_cdeg; g_ld_angle_diff_std_cdeg = (uint16_t)std_cdeg;
+  } else { g_ld_angle_diff_mean_cdeg = 0; g_ld_angle_diff_std_cdeg = 0; }
+
+  // Save current scan distances/angles for next comparison
+  for (uint16_t i = 0; i < nb && i < LD06_MAX_PTS_SCAN; ++i) {
+    g_prev_scan_dists[i] = dists[i];
+    g_prev_scan_angles[i] = angles[i];
+  }
+  g_prev_scan_nb = nb;
+
+  // Range counters
+  g_ld_zero_count = zero_count; g_ld_invalid_count = invalid_count;
+  g_ld_min_distance_mm = min_mm; g_ld_max_distance_mm = max_mm; g_ld_large_jump_count = large_jump_count;
 }

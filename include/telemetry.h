@@ -22,6 +22,13 @@ extern uint32_t scan_telemetry_call_count;
 extern uint32_t scan_telemetry_sent_count;
 extern uint16_t last_scan_point_count;
 
+// Allow LD06 driver to hand completed raw scans to telemetry diagnostics
+// for expensive per-scan analysis (keeps heavy work out of the realtime
+// telemetry send path). Forward-declare DataPointHandler to avoid header
+// ordering issues.
+struct DataPointHandler;
+void telemetry_update_ld06_diagnostics(struct DataPointHandler *scan);
+
 // Send a diagnostic packet with the above counters (temporary)
 void telemetry_send_diag_scan();
 

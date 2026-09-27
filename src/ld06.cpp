@@ -1,4 +1,5 @@
 #include "ld06.h"
+#include "telemetry.h"
 
 // Diagnostic globals (defined here)
 uint16_t ld06_diag_num_points = 0;
@@ -221,6 +222,8 @@ void LD06::computeData() {
           if (_fullScan) {
             swapBuffers();
             analyzePreviousScan(_previousScan);
+            // Compute LD06 diagnostics once per completed raw scan.
+            telemetry_update_ld06_diagnostics(_previousScan);
           }
           #if LD06_DEBUG_ASCII
           Serial.printf("LD06: wrap accepted, prev_count=%u\n", (unsigned)_previousScan->index);
@@ -297,6 +300,8 @@ void LD06::computeData() {
   if (!_fullScan) {
     swapBuffers();
     analyzePreviousScan(_previousScan);
+    // In non-fullScan mode each packet is treated as a completed chunk; update diagnostics.
+    telemetry_update_ld06_diagnostics(_previousScan);
     _newScan = true;
   }
 }
