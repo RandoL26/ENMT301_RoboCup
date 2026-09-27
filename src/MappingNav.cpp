@@ -313,10 +313,10 @@ void MappingNav::markRay(float start_x, float start_y,
 }
 
 void MappingNav::maybeMarkFree(uint16_t idx) {
-  // Do not erase occupied cells with a single free observation.
-  if (getOccupancy(idx) == OCC_UNKNOWN) {
-    setOccupancy(idx, OCC_FREE);
-  }
+  // Mark cell as FREE when it has been positively observed free by a ray.
+  // This allows previously-occupied cells to become FREE when a later
+  // valid observation passes through them with no obstacle.
+  setOccupancy(idx, OCC_FREE);
 }
 
 bool MappingNav::expectedBoundaryDistance(float ray_angle_global, float &out_dist_m) const {

@@ -9,6 +9,7 @@ import threading
 import time
 from dataclasses import dataclass
 from queue import Queue, Empty, Full
+from collections import deque
 from typing import Optional
 
 import numpy as np
@@ -85,6 +86,7 @@ PACKET_GRID_KEYFRAME = 0x02
 PACKET_GRID_DELTA = 0x03
 PACKET_HEARTBEAT = 0x04
 PACKET_SCAN = 0x05
+PACKET_DIAG = 0x06
 
 POSE_FMT = "<fffH"
 POSE_SIZE = struct.calcsize(POSE_FMT)
@@ -147,10 +149,19 @@ def crc16_ccitt(data: bytes, init: int = 0xFFFF) -> int:
 
 def decode_packed_grid(packed: bytes, n_cells: int) -> tuple[np.ndarray, np.ndarray]:
     arr = np.frombuffer(packed, dtype=np.uint8)
-    cells = np.empty(arr.size * 2, dtype=np.uint8)
-    cells[0::2] = arr & 0x0F
-    cells[1::2] = (arr >> 4) & 0x0F
-    cells = cells[:n_cells]
+    # Support two packing formats:
+    # - Legacy: two 4-bit cells per byte (low nibble = cell0, high nibble = cell1)
+    # - Current firmware: one byte per cell
+    if arr.size == n_cells:
+        # one byte per cell
+        cells = arr.copy()
+    else:
+        # assume packed nibble format
+        cells = np.empty(arr.size * 2, dtype=np.uint8)
+        cells[0::2] = arr & 0x0F
+        cells[1::2] = (arr >> 4) & 0x0F
+        cells = cells[:n_cells]
+
     occupancy = cells & 0x03
     terrain = (cells >> 2) & 0x03
     return occupancy, terrain
@@ -266,6 +277,7 @@ class TelemetryReconstructor:
         self.state.cell_mm = int(cell_mm)
         self.state.occupancy = occupancy.copy()
         self.state.terrain = terrain.copy()
+        print(f"[visualizer] applied keyframe grid={self.state.grid_w}x{self.state.grid_h} cell_mm={self.state.cell_mm}")
         return True
 
     def _apply_delta(self, payload: bytes) -> bool:
@@ -288,6 +300,7 @@ class TelemetryReconstructor:
                 continue
             flat_occ[idx] = packed_cell & 0x03
             flat_ter[idx] = (packed_cell >> 2) & 0x03
+        print(f"[visualizer] applied delta changes={change_count}")
         return True
 
     def _apply_heartbeat(self, payload: bytes) -> bool:
@@ -323,6 +336,21 @@ class TelemetryReconstructor:
         self.state.scan_point_count = pts.shape[0]
         return True
 
+    def _apply_diag(self, payload: bytes) -> bool:
+        # parse first diagnostic counters from telemetry_send_diag_scan layout
+        # scan_ready_count (u32), scan_telemetry_call_count (u32), scan_telemetry_sent_count (u32), last_scan_point_count (u16)
+        if len(payload) < 14:
+            return False
+        scan_ready = struct.unpack_from('<I', payload, 0)[0]
+        call_count = struct.unpack_from('<I', payload, 4)[0]
+        sent_count = struct.unpack_from('<I', payload, 8)[0]
+        last_pts = struct.unpack_from('<H', payload, 12)[0]
+        # update state fields so UI shows scan activity
+        self.state.scan_packet_count = int(sent_count)
+        self.state.scan_point_count = int(last_pts)
+        print(f"[visualizer] diag ready={scan_ready} call={call_count} sent={sent_count} pts={last_pts}")
+        return True
+
 
 class SerialWorker(threading.Thread):
     def __init__(self, port: str, baud: int, out_q: Queue, timeout_s: float = 0.1) -> None:
@@ -352,8 +380,13 @@ class SerialWorker(threading.Thread):
                     if not chunk:
                         continue
                     for packet in parser.feed(chunk):
-                        if recon.apply(packet):
-                            self._push_latest(recon.state)
+                            # Lightweight packet-level logging for debugging
+                            try:
+                                print(f"[telemetry] pkt_type=0x{packet.packet_type:02X} seq={packet.seq} len={len(packet.payload)}")
+                            except Exception:
+                                pass
+                            if recon.apply(packet):
+                                self._push_latest(recon.state)
 
             except (serial.SerialException, OSError) as e:
                 print(f"[serial] disconnected/error: {e}")
@@ -402,7 +435,7 @@ class SerialWorker(threading.Thread):
 
 
 class LiveVisualizer:
-    def __init__(self, fps: float = 20.0) -> None:
+    def __init__(self, fps: float = 20.0, log_path: Optional[str] = None) -> None:
         self.fps = max(1.0, fps)
         self.state: Optional[TelemetryState] = None
 
@@ -448,6 +481,21 @@ class LiveVisualizer:
         # Maintain a short trail of past poses
         self._trail = []
         self._trail_max = 200
+        # Diagnostic buffers for temporary jitter analysis
+        # Keep recent scan centroids and pose history to compute variation.
+        self._scan_centroids = deque(maxlen=50)
+        self._pose_history = deque(maxlen=50)
+        # Keep last full scan (angles,dists) for pairwise comparison
+        self._last_scan = None  # tuple(np.ndarray angles, np.ndarray dists)
+        # CSV logging
+        self._log_fh = None
+        if log_path:
+            try:
+                self._log_fh = open(log_path, "w", buffering=1)
+                # header
+                self._log_fh.write("timestamp,seq,scan_pts,scan_jitter_cm,scan_dd_mm,scan_da_deg,scan_max_dd_mm,scan_large_dd_count,scan_ang_span_deg,scan_ang_std_deg,pose_theta_std_deg\n")
+            except Exception as e:
+                print(f"[visualizer] failed to open log file {log_path}: {e}")
 
     @staticmethod
     def grid_to_rgb(occupancy: np.ndarray, terrain: np.ndarray) -> np.ndarray:
@@ -496,6 +544,112 @@ class LiveVisualizer:
             self.path_line.set_data([], [])
 
         theta_deg = np.degrees(state.pose_theta_rad)
+
+        # Compute simple jitter diagnostics from recent scans / poses
+        scan_jitter_cm = 0.0
+        pose_theta_std_deg = 0.0
+        scan_mean_dd_mm = 0.0
+        scan_mean_da_deg = 0.0
+        scan_ang_span_deg = 0.0
+        scan_ang_std_deg = 0.0
+        if state.lidar_points is not None and state.lidar_points.size > 0:
+            # (angles,distances -> xy around robot) -- TEMPORARY LOCAL-FRAME PLOT
+            angles = state.lidar_points[:, 0]
+            dists = state.lidar_points[:, 1]
+            # Original (world) transform kept commented for easy restore:
+            # xs = state.pose_x_m + dists * np.cos(angles + state.pose_theta_rad)
+            # ys = state.pose_y_m + dists * np.sin(angles + state.pose_theta_rad)
+
+            # TEMP: plot in robot-local coordinates (no pose applied)
+            xs = dists * np.cos(angles)
+            ys = dists * np.sin(angles)
+            self.scan_scatter.set_offsets(np.vstack((xs, ys)).T)
+
+            # Compute centroid of current scan in local frame and record
+            try:
+                cx = float(np.mean(xs))
+                cy = float(np.mean(ys))
+                self._scan_centroids.append((cx, cy))
+            except Exception:
+                pass
+
+            if len(self._scan_centroids) > 1:
+                arr = np.array(self._scan_centroids)
+                std_x = float(np.std(arr[:, 0]))
+                std_y = float(np.std(arr[:, 1]))
+                scan_jitter_cm = (np.sqrt(std_x * std_x + std_y * std_y) * 100.0)
+            # Compare to previous scan if available: per-angle nearest-match distance diffs
+            try:
+                if self._last_scan is not None:
+                    prev_angles, prev_dists = self._last_scan
+                    # helper for wrapped angle diff
+                    def wrap_diff(a, b):
+                        d = a - b
+                        d = (d + np.pi) % (2 * np.pi) - np.pi
+                        return d
+
+                    # For each current angle, find index of nearest prev angle
+                    # Convert to radians
+                    cur_ang = np.asarray(angles)
+                    cur_dist = np.asarray(dists)
+                    prev_ang = np.asarray(prev_angles)
+                    prev_dist = np.asarray(prev_dists)
+
+                    # Ensure prev_ang sorted for efficient search by angle
+                    order = np.argsort(prev_ang)
+                    prev_ang_s = prev_ang[order]
+                    prev_dist_s = prev_dist[order]
+
+                    # use searchsorted on circular domain by duplicating array with +/-2pi
+                    pa = np.concatenate([prev_ang_s - 2 * np.pi, prev_ang_s, prev_ang_s + 2 * np.pi])
+                    pd = np.concatenate([prev_dist_s, prev_dist_s, prev_dist_s])
+
+                    idxs = np.searchsorted(pa, cur_ang)
+                    # clamp indices
+                    idxs = np.clip(idxs, 0, pa.size - 1)
+                    nearest_idx = idxs
+                    ang_diffs = np.abs(wrap_diff(cur_ang, pa[nearest_idx]))
+                    dist_diffs = np.abs(cur_dist - pd[nearest_idx])
+                    if dist_diffs.size > 0:
+                        scan_mean_dd_mm = float(np.mean(dist_diffs))
+                        scan_mean_da_deg = float(np.degrees(np.mean(ang_diffs)))
+                        scan_max_dd_mm = float(np.max(dist_diffs))
+                        scan_large_dd_count = int(np.sum(dist_diffs > 0.05))
+                    else:
+                        scan_max_dd_mm = 0.0
+                        scan_large_dd_count = 0
+            except Exception:
+                pass
+
+            # compute angular span/std (degrees) for diagnostics
+            try:
+                angs = np.asarray(angles)
+                # normalize to [-pi,pi] for std
+                angs_wrap = (angs + np.pi) % (2 * np.pi) - np.pi
+                scan_ang_span_deg = float((np.max(angs_wrap) - np.min(angs_wrap)) * 180.0 / np.pi)
+                scan_ang_std_deg = float(np.degrees(np.std(angs_wrap)))
+            except Exception:
+                scan_ang_span_deg = 0.0
+                scan_ang_std_deg = 0.0
+
+            # Save current scan for next comparison
+            try:
+                self._last_scan = (angles.copy(), dists.copy())
+            except Exception:
+                self._last_scan = None
+        else:
+            self.scan_scatter.set_offsets(np.empty((0, 2)))
+
+        # Record recent pose theta and compute angular std (deg)
+        try:
+            self._pose_history.append((state.pose_x_m, state.pose_y_m, state.pose_theta_rad))
+            if len(self._pose_history) > 1:
+                ph = np.array(self._pose_history)
+                theta_std = float(np.std(ph[:, 2]))
+                pose_theta_std_deg = np.degrees(theta_std)
+        except Exception:
+            pass
+
         self.info_text.set_text(
             f"seq: {state.seq}\n"
             f"x: {state.pose_x_m:.3f} m\n"
@@ -505,8 +659,20 @@ class LiveVisualizer:
             f"tx_queue: {state.tx_queue_depth}\n"
             f"drops: {state.dropped_frames}\n"
             f"SCAN PKTS: {state.scan_packet_count}\n"
-            f"SCAN PTS: {state.scan_point_count}"
+            f"SCAN PTS: {state.scan_point_count}\n"
+            f"scan_jitter: {scan_jitter_cm:.2f} cm\n"
+            f"pose_theta_std: {pose_theta_std_deg:.3f} deg\n"
+            f"scan_dd: {scan_mean_dd_mm:.2f} mm\n"
+            f"scan_da: {scan_mean_da_deg:.3f} deg"
         )
+
+        # Write CSV log if enabled
+        if self._log_fh is not None:
+            try:
+                ts = time.time()
+                self._log_fh.write(f"{ts:.6f},{state.seq},{state.scan_point_count},{scan_jitter_cm:.3f},{scan_mean_dd_mm:.3f},{scan_mean_da_deg:.3f},{scan_max_dd_mm:.3f},{scan_large_dd_count},{scan_ang_span_deg:.3f},{scan_ang_std_deg:.6f},{pose_theta_std_deg:.6f}\n")
+            except Exception:
+                pass
 
         # Update trail
         self._trail.append((state.pose_x_m, state.pose_y_m))
@@ -577,6 +743,7 @@ def main() -> None:
     ap.add_argument("--port", type=str, default=None, help="Serial port, e.g. COM3")
     ap.add_argument("--baud", type=int, default=115200, help="Baud rate")
     ap.add_argument("--fps", type=float, default=20.0, help="Display refresh rate")
+    ap.add_argument("--log", type=str, default=None, help="Optional CSV log path for diagnostics")
     args = ap.parse_args()
 
     port = args.port or pick_default_port()
@@ -587,7 +754,7 @@ def main() -> None:
     worker = SerialWorker(port=port, baud=args.baud, out_q=q)
     worker.start()
 
-    viz = LiveVisualizer(fps=args.fps)
+    viz = LiveVisualizer(fps=args.fps, log_path=args.log)
     _ani = viz.animate(q)
 
     try:
