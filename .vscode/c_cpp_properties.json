@@ -235,7 +235,7 @@
                 "TELEMETRY_ALLOW_ASCII_TELEPLOT=1",
                 "USB_SERIAL",
                 "ARDUINO=10805",
-                "TEENSYDUINO=160",
+                "TEENSYDUINO=162",
                 "CORE_TEENSY",
                 "F_CPU=600000000",
                 "LAYOUT_US_ENGLISH",

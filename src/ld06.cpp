@@ -16,6 +16,11 @@ uint8_t  ld06_diag_approx_one_revolution = 0;
 uint16_t ld06_diag_first_large_jump_idx = 0xFFFF;
 uint16_t ld06_diag_first_neg_step_idx = 0xFFFF;
 
+// New diagnostics for scan validation
+uint16_t ld06_diag_rejected_scan_count = 0;  // Scans rejected due to invalid quality
+uint16_t ld06_diag_backward_angle_count = 0; // Backward angle steps in last scan
+float ld06_diag_last_angular_span = 0.0f;    // Last scan's angular coverage
+
 static void analyzePreviousScan(DataPointHandler *scan) {
   if (!scan) return;
   uint16_t n = scan->index;
@@ -89,6 +94,8 @@ static void analyzePreviousScan(DataPointHandler *scan) {
 LD06::LD06(HardwareSerial &serial, uint8_t pwmPin)
   : _lidarSerial(&serial),
     _pin(pwmPin),
+    _currentBuffer(0),      // FIX: Explicit initialization
+    _currentScan(&_scanA),  // FIX: Explicit initialization to _scanA
     _previousScan(&_scanB) {
   _scanA.index = 0;
   _scanB.index = 0;
@@ -217,13 +224,20 @@ void LD06::computeData() {
       if (drop > WRAP_DEG_THRESHOLD) {
         // Detected candidate wrap: this point belongs to the next revolution.
         if (_currentScan->index >= MIN_POINTS_PER_REV) {
-          // Accept previous scan as complete, swap buffers and analyze
-          _newScan = true;
-          if (_fullScan) {
-            swapBuffers();
-            analyzePreviousScan(_previousScan);
-            // Compute LD06 diagnostics once per completed raw scan.
-            telemetry_update_ld06_diagnostics(_previousScan);
+          // FIX: Validate scan before accepting and publishing
+          if (isScanValid(_currentScan)) {
+            // Accept previous scan as complete, swap buffers and analyze
+            _newScan = true;
+            if (_fullScan) {
+              swapBuffers();
+              analyzePreviousScan(_previousScan);
+              // Compute LD06 diagnostics once per completed raw scan.
+              telemetry_update_ld06_diagnostics(_previousScan);
+            }
+          } else {
+            // Scan failed validation; reject and start fresh
+            ld06_diag_rejected_scan_count++;
+            _currentScan->index = 0;  // Clear current scan to retry
           }
           #if LD06_DEBUG_ASCII
           Serial.printf("LD06: wrap accepted, prev_count=%u\n", (unsigned)_previousScan->index);
@@ -298,11 +312,19 @@ void LD06::computeData() {
 
   // En mode "non full scan", chaque paquet déclenche un swap
   if (!_fullScan) {
-    swapBuffers();
-    analyzePreviousScan(_previousScan);
-    // In non-fullScan mode each packet is treated as a completed chunk; update diagnostics.
-    telemetry_update_ld06_diagnostics(_previousScan);
-    _newScan = true;
+    // FIX: Validate scan quality before publishing in chunk mode
+    if (isScanValid(_currentScan)) {
+      swapBuffers();
+      analyzePreviousScan(_previousScan);
+      // In non-fullScan mode each packet is treated as a completed chunk; update diagnostics.
+      telemetry_update_ld06_diagnostics(_previousScan);
+      _newScan = true;
+    } else {
+      // Chunk failed validation; skip this buffer swap and retry
+      ld06_diag_rejected_scan_count++;
+      _currentScan->index = 0;  // Clear current buffer to retry
+      _newScan = false;
+    }
   }
 }
 
@@ -424,6 +446,59 @@ void LD06::setOffsetPosition(int16_t xPos = 0, int16_t yPos = 0, float anglePos 
   _angularOffset = anglePos;
 }
 #endif
+
+// FIX: Validate scan quality before publishing
+// Returns true if scan appears to be a valid complete or mostly complete revolution
+bool LD06::isScanValid(DataPointHandler* scan) {
+  if (!scan || scan->index < 100) {
+    // Insufficient data for a meaningful scan
+    return false;
+  }
+
+  // Calculate angular span
+  if (scan->index < 2) return false;
+  
+  float firstAngle = scan->points[0].angle;
+  float lastAngle = scan->points[scan->index - 1].angle;
+  
+  // Handle wrap-around: if first angle > last angle, we've wrapped 0°
+  float angularSpan;
+  if (lastAngle >= firstAngle) {
+    angularSpan = lastAngle - firstAngle;
+  } else {
+    angularSpan = (360.0f - firstAngle) + lastAngle; // Wrap-around case
+  }
+  
+  // A valid revolution should span 300-380 degrees
+  // Lower bound catches incomplete scans; upper bound catches duplicates
+  if (angularSpan < 300.0f || angularSpan > 380.0f) {
+    ld06_diag_last_angular_span = angularSpan;
+    return false;
+  }
+
+  // Count backward angle steps (indicates packet reordering or data corruption)
+  uint16_t backwardStepCount = 0;
+  for (uint16_t i = 1; i < scan->index; i++) {
+    float prevAngle = scan->points[i-1].angle;
+    float currAngle = scan->points[i].angle;
+    
+    // Allow one wrap-around per scan (0° transition); count others as anomalies
+    if (currAngle < prevAngle && (prevAngle - currAngle) < 300.0f) {
+      backwardStepCount++;
+    }
+  }
+  
+  // More than a few backward steps indicates corruption
+  if (backwardStepCount > 3) {
+    ld06_diag_backward_angle_count = backwardStepCount;
+    return false;
+  }
+
+  // Scan appears valid
+  ld06_diag_backward_angle_count = backwardStepCount;
+  ld06_diag_last_angular_span = angularSpan;
+  return true;
+}
 
 void LD06::swapBuffers() {
   if (_currentBuffer) {

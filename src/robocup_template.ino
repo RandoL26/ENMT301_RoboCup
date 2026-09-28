@@ -42,6 +42,10 @@
 #include "ld06.h"                   // LD06 LiDAR
 #include "BigServo.h"               // Big servo
 #include "RoboSLAM.h"
+#include "Localisation.h"           // Sensor fusion localisation
+#include "POIDetector.h"             // ToF-based POI/weight detection
+#include "ToFCoverageMap.h"          // ToF coverage tracking
+#include "ToFSearchPlanner.h"        // Search target generation
 #include "telemetry.h"
 
 // Gate legacy ASCII Teleplot / diagnostic prints so they don't corrupt
@@ -83,6 +87,21 @@
 
 #define LD06_READ_TASK_PERIOD               1
 #define LD06_READ_TASK_NUM_EXECUTE          -1
+
+#define LOCALISATION_UPDATE_PERIOD          10
+#define LOCALISATION_UPDATE_NUM_EXECUTE     -1
+
+#define POI_DETECTOR_UPDATE_PERIOD          100  // 10 Hz: process ToF readings
+#define POI_DETECTOR_UPDATE_NUM_EXECUTE     -1
+
+#define TOF_SEARCH_PLANNER_PERIOD           500  // 2 Hz: generate search targets less frequently
+#define TOF_SEARCH_PLANNER_NUM_EXECUTE      -1
+
+#define POI_DETECTOR_UPDATE_PERIOD          100  // 10 Hz: process ToF readings
+#define POI_DETECTOR_UPDATE_NUM_EXECUTE     -1
+
+#define TOF_SEARCH_PLANNER_PERIOD           1000  // 1 Hz: generate search targets
+#define TOF_SEARCH_PLANNER_NUM_EXECUTE      -1
 
 #define HERKULEX_TEST_PERIOD               1200
 
@@ -177,6 +196,9 @@ LD06 ld06(Serial2);
 MappingNav mappingNav;
 RoboSLAM roboSlam(mappingNav, driveMotor, opticalFlow);
 
+// Sensor fusion localisation
+Localisation localisation;
+
 // Ultrasonic Sensor instance (kept for backwards compatibility)
 // UltrasonicSensor ultrasonicSensor(ULTRASONIC_TRIGGER_PIN_1, ULTRASONIC_ECHO_PIN_1);
 
@@ -194,6 +216,11 @@ IRDistanceSensor irDistanceSensor(IR_DISTANCE_SENSOR_PIN);
 
 // TOF Sensor Array instance
 TOFSensorArray tofSensorArray(VL53L1X_SENSOR_COUNT);
+
+// POI detection system
+POIDetector poiDetector;
+ToFCoverageMap tofCoverageMap;
+ToFSearchPlanner searchPlanner;
 
 // CH9143 Bluetooth instance
 CH9143Bluetooth bluetooth(&Serial7, BLUETOOTH_RX_PIN, BLUETOOTH_TX_PIN, BLUETOOTH_BAUD);
@@ -269,6 +296,8 @@ void optical_flow_callback(void) {
         float tx = opticalFlow.getTotalXmm();
         float ty = opticalFlow.getTotalYmm();
         printfBoth("OpticalFlow totalX: %.2f mm  totalY: %.2f mm\n", tx, ty);
+        // Update localisation with optical flow
+        localisation.updateOpticalFlow(opticalFlow);
     }
 }
 
@@ -283,6 +312,10 @@ void ld06_lidar_callback(void) {
     if (scanReady) {
         // Feed on-board RoboSLAM then also emit Teleplot for external tools if needed
         roboSlam.processScan(ld06, current_imu_data);
+        
+        // Also feed LiDAR scan to sensor fusion localisation for pose correction
+        localisation.correctFromLiDAR(ld06, mappingNav);
+        
         // Diagnostic print: number of points available for telemetry
 
         // Emit a downsampled scan for the visualizer (non-blocking, small)
@@ -299,12 +332,94 @@ void ld06_lidar_callback(void) {
     }
 }
 
+// Task wrapper for localisation sensor fusion update
+void localisation_update_callback(void) {
+    // Perform sensor fusion (prediction from IMU + flow)
+    localisation.updateFromSensors();
+    
+    // Optional: print diagnostics periodically (every 1000 ms)
+    static unsigned long last_diag_print = 0;
+    unsigned long now = millis();
+    if (now - last_diag_print >= 1000) {
+        last_diag_print = now;
+        
+        // Print fused localisation state
+        RobotPose pose = localisation.getPose();
+        LocalisationDiags diags = localisation.getDiags();
+        
+        printfBoth("LOCALISATION: x=%.1f mm, y=%.1f mm, theta=%.3f rad | "
+                   "flow: dx=%.1f, dy=%.1f | "
+                   "lidar_match=%u, accepted=%u, frames=%lu\n",
+                   pose.x_mm, pose.y_mm, pose.theta_rad,
+                   diags.flow_dx_mm, diags.flow_dy_mm,
+                   diags.lidar_match_score, diags.lidar_correction_accepted,
+                   diags.frame_count);
+    }
+}
+
 // Task wrapper for VL53L1X sensor reading
 void vl53l1x_sensor_callback(void) {
     if (tofSensorArray.isInitialized()) {
         TOFSensorArray::TOFData tofData = tofSensorArray.readDistances();
         tofSensorArray.printDistances(tofData);
     }
+}
+
+// Task wrapper for POI detector (processes ToF readings)
+void poi_detector_callback(void) {
+    if (tofSensorArray.isInitialized()) {
+        TOFSensorArray::TOFData tofData = tofSensorArray.readDistances();
+        
+        // Get latest ToF reading (assume single sensor for now)
+        float tof_distance_m = (tofData.sensorCount > 0) ? (tofData.distances[0] / 1000.0f) : 0.0f;
+        
+        // Update POI detector with fused pose and occupancy map
+        poiDetector.update(localisation, mappingNav, tof_distance_m);
+        
+        // Update ToF coverage map if reading is valid
+        if (tof_distance_m > 0.0f) {
+            RobotPose pose = localisation.getPose();
+            float sensor_x_m = pose.x_mm / 1000.0f;
+            float sensor_y_m = pose.y_mm / 1000.0f;
+            float sensor_yaw_rad = pose.theta_rad;  // Simplified: no offset
+            tofCoverageMap.markBeamCovered(sensor_x_m, sensor_y_m, sensor_yaw_rad, tof_distance_m);
+        }
+    }
+}
+
+// Task wrapper for ToF search planner (generates next search target)
+void tof_search_planner_callback(void) {
+    // Check if search is complete
+    if (searchPlanner.isSearchComplete(tofCoverageMap, mappingNav)) {
+        // Search complete; no new targets needed
+        return;
+    }
+    
+    // Generate candidate poses
+    const uint16_t MAX_CANDIDATES = 30;
+    SearchCandidate candidates[MAX_CANDIDATES];
+    
+    MappingNav::Pose2D current_pose = mappingNav.getPose();
+    uint16_t candidate_count = searchPlanner.generateCandidates(
+        current_pose, tofCoverageMap, mappingNav, candidates, MAX_CANDIDATES);
+    
+    // Select best candidate
+    int16_t best_idx = searchPlanner.selectBestCandidate(candidates, candidate_count);
+    if (best_idx < 0) {
+        // No useful candidates available
+        return;
+    }
+    
+    // Extract best candidate pose
+    SearchCandidate &best = candidates[best_idx];
+    
+    // [TODO: Issue navigation goal to D* Lite pathfinder]
+    // For now, just print diagnostics
+    #if TELEMETRY_ALLOW_ASCII_TELEPLOT
+    Serial.printf("POI_SEARCH: target=(%.2f, %.2f, %.2f) coverage=%.1f%% score=%.0f\n",
+                  best.x_m, best.y_m, best.theta_rad,
+                  best.new_coverage_percent, best.utility_score);
+    #endif
 }
 
 // Task wrapper for IR distance sensor reading
@@ -318,6 +433,8 @@ void ir_distance_sensor_callback(void) {
 // Task wrapper for IMU reading
 void imu_task_callback(void) {
     current_imu_data = read_imu();
+    // Update localisation with IMU data
+    localisation.updateIMU(current_imu_data);
     // Print tidy IMU headings (relative to startup) and accelerations
     float heading_rel = current_imu_data.euler_h - imu_heading_offset;
     // Normalize heading to [-180,180]
@@ -625,6 +742,9 @@ Task tVL53L1X_sensor(VL53L1X_SENSOR_READ_PERIOD, VL53L1X_SENSOR_NUM_EXECUTE, &vl
 Task tIR_Distance_sensor(IR_DISTANCE_SENSOR_READ_PERIOD, IR_DISTANCE_SENSOR_NUM_EXECUTE, &ir_distance_sensor_callback);
 Task tOpticalFlow(OF_READ_TASK_PERIOD, OF_READ_TASK_NUM_EXECUTE, &optical_flow_callback);
 Task tLD06_lidar(LD06_READ_TASK_PERIOD, LD06_READ_TASK_NUM_EXECUTE, &ld06_lidar_callback);
+Task tLocalisation(LOCALISATION_UPDATE_PERIOD, LOCALISATION_UPDATE_NUM_EXECUTE, &localisation_update_callback);
+Task tPOI_Detector(POI_DETECTOR_UPDATE_PERIOD, POI_DETECTOR_UPDATE_NUM_EXECUTE, &poi_detector_callback);
+Task tToF_SearchPlanner(TOF_SEARCH_PLANNER_PERIOD, TOF_SEARCH_PLANNER_NUM_EXECUTE, &tof_search_planner_callback);
 Task tSensor_average(SENSOR_AVERAGE_PERIOD,      SENSOR_AVERAGE_NUM_EXECUTE,      &sensor_average);
 Task tHerkulexTest(HERKULEX_TEST_PERIOD, -1, &herkulex_test_callback);
 Task tBT_stream_test(200, -1, &bt_stream_test_callback);  // Stream test: every 200ms
@@ -855,6 +975,21 @@ void robot_init() {
         driveMotor.begin();
         // Initialize RoboSLAM baseline (read initial encoder/flow/imu state)
         roboSlam.begin();
+        // Initialize sensor fusion localisation
+        localisation.begin();
+        localisation.resetPose(0.0f, 0.0f, 0.0f);  // Start at origin with zero heading
+        
+        // Initialize POI detection system
+        printlnBoth("Initialising POI Detector...");
+        ToFExtrinsics tof_extrinsics;
+        // CALIBRATION REQUIRED: Measure your robot's ToF mounting offset
+        tof_extrinsics.x_offset_m = 0.0f;   // TODO: measure forward offset from robot center
+        tof_extrinsics.y_offset_m = 0.0f;   // TODO: measure lateral offset
+        tof_extrinsics.yaw_offset_rad = 0.0f;  // TODO: measure sensor yaw angle
+        poiDetector.begin(tof_extrinsics);
+        tofCoverageMap.begin();
+        searchPlanner.begin();
+        
         // Initialize telemetry over USB Serial
         telemetry_init(Serial);
         
@@ -899,6 +1034,9 @@ void task_init() {
     // taskManager.addTask(tBT_stream_test);  // Disabled for control reliability
     // taskManager.addTask(tOpticalFlow);        //reading optical flow sensor
     taskManager.addTask(tLD06_lidar);          //reading LD06 lidar
+    taskManager.addTask(tLocalisation);        //sensor fusion localisation update
+    taskManager.addTask(tPOI_Detector);        //POI detection from ToF
+    taskManager.addTask(tToF_SearchPlanner);   //search target generation
     taskManager.addTask(tBig_Servo);
     //enable the tasks
   tRead_ultrasonic.enable();
@@ -926,6 +1064,9 @@ void task_init() {
     // tBT_stream_test.enable();  // Disabled for control reliability
     tOpticalFlow.enable();
     tLD06_lidar.enable();
+    tLocalisation.enable();
+    tPOI_Detector.enable();
+    tToF_SearchPlanner.enable();
 
  printlnBoth("Tasks have been initialised \n");
 }

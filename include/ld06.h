@@ -131,6 +131,7 @@ private:
   bool readDataNoCRC();
   void computeData();
   inline bool filter(const DataPoint &point) __attribute__((always_inline));
+  bool isScanValid(DataPointHandler* scan);  // FIX: Validate scan quality
   void swapBuffers();
 
   // Data

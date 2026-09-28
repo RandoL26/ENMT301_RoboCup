@@ -115,6 +115,9 @@ public:
 
   // Raw map access (1 byte per cell bit-packed as described above)
   const uint8_t *getGridData() const;
+  
+  // Cell occupancy query (needed for POI detection and search planning)
+  Occupancy getOccupancy(uint16_t idx) const;
 
 private:
   // Cell packing helpers
@@ -169,8 +172,7 @@ private:
   bool inBoundsCell(int32_t cx, int32_t cy) const;
   bool inBoundsWorld(float x_m, float y_m) const;
 
-  // Cell read/write helpers
-  Occupancy getOccupancy(uint16_t idx) const;
+  // Cell read/write helpers (occupancy moved to public section above)
   void setOccupancy(uint16_t idx, Occupancy occ);
   Terrain getTerrain(uint16_t idx) const;
   void setTerrain(uint16_t idx, Terrain terrain);

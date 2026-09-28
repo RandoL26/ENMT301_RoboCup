@@ -313,10 +313,12 @@ void MappingNav::markRay(float start_x, float start_y,
 }
 
 void MappingNav::maybeMarkFree(uint16_t idx) {
-  // Mark cell as FREE only if it was previously UNKNOWN.
-  // Do not overwrite OCCUPIED cells — an occupied cell should only be
-  // cleared by an explicit valid observation path elsewhere in the code.
-  if (getOccupancy(idx) == OCC_UNKNOWN) {
+  // Mark cell as FREE when observed as empty space.
+  // Allows OCCUPIED → FREE transitions (e.g., moving obstacles or misdetections).
+  // Only UNKNOWN cells remain UNKNOWN; once observed as either OCCUPIED or FREE,
+  // subsequent observations determine the cell state.
+  Occupancy current = getOccupancy(idx);
+  if (current != OCC_OCCUPIED) {
     setOccupancy(idx, OCC_FREE);
   }
 }
