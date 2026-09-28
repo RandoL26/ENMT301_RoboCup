@@ -303,13 +303,84 @@ class TelemetryReconstructor:
         if packet.packet_type == PACKET_SCAN:
             return self.scan(packet.payload)
 
+        # Diagnostic packets are currently ignored.
         if packet.packet_type == PACKET_DIAG:
             return False
 
+        # Inflated obstacle grid.
         if packet.packet_type == PACKET_INFLATED_GRID:
-            return self._apply_inflated_grid(packet.payload)
+            return self.inflated_grid(packet.payload)
 
         return False
+
+    # --------------------------------------------------------
+    # INFLATED GRID
+    # --------------------------------------------------------
+
+    def inflated_grid(self, payload):
+
+        if len(payload) < 8:
+            return False
+
+        grid_w = int.from_bytes(
+            payload[0:2],
+            "little",
+        )
+
+        grid_h = int.from_bytes(
+            payload[2:4],
+            "little",
+        )
+
+        cell_mm = int.from_bytes(
+            payload[4:6],
+            "little",
+        )
+
+        grid_size = int.from_bytes(
+            payload[6:8],
+            "little",
+        )
+
+        expected_size = (
+            grid_w
+            * grid_h
+        )
+
+        if grid_size != expected_size:
+            return False
+
+        if len(payload) < 8 + grid_size:
+            return False
+
+        grid = np.frombuffer(
+            payload[
+                8:
+                8 + grid_size
+            ],
+            dtype=np.uint8,
+        ).copy()
+
+        try:
+
+            grid = grid.reshape(
+                (
+                    grid_h,
+                    grid_w,
+                )
+            )
+
+        except ValueError:
+
+            return False
+
+        self.state.inflated_grid = grid
+
+        self.state.grid_w = int(grid_w)
+        self.state.grid_h = int(grid_h)
+        self.state.cell_mm = int(cell_mm)
+
+        return True
 
     # --------------------------------------------------------
     # POSE + PATH
@@ -329,7 +400,11 @@ class TelemetryReconstructor:
 
         if not all(
             math.isfinite(v)
-            for v in (x, y, theta)
+            for v in (
+                x,
+                y,
+                theta,
+            )
         ):
             return False
 
@@ -347,7 +422,8 @@ class TelemetryReconstructor:
 
             raw = np.frombuffer(
                 payload[
-                    offset:required
+                    offset:
+                    required
                 ],
                 dtype=np.uint8,
             )
@@ -434,6 +510,7 @@ class TelemetryReconstructor:
             cells = cells[:n_cells]
 
         occupancy = cells & 0x03
+
         terrain = (
             cells >> 2
         ) & 0x03
@@ -495,8 +572,6 @@ class TelemetryReconstructor:
             .terrain
             .reshape(-1)
         )
-
-
 
         for _ in range(count):
 
@@ -591,7 +666,10 @@ class TelemetryReconstructor:
             return False
 
         raw = np.frombuffer(
-            payload[2:required],
+            payload[
+                2:
+                required
+            ],
             dtype=np.float32,
         )
 
@@ -1520,6 +1598,9 @@ class RoboCupVisualizer(QMainWindow):
 
         # Clear map
         self.grid_image.clear()
+
+        # Clear inflated map
+        self.inflated_image.clear()
 
         # Clear path
         self.path_item.clear()
