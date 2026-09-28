@@ -1,42 +1,4 @@
 #!/usr/bin/env python3
-"""Visualiser for Teensy mapping telemetry (binary framed protocol 0xA5 0x5A)."""
-
-from __future__ import annotations
-
-import argparse
-import struct
-import threading
-import time
-import math
-from dataclasses import dataclass
-from queue import Queue, Empty, Full
-from collections import deque
-from typing import Optional
-
-import numpy as np
-import serial
-import serial.tools.list_ports
-
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
-from matplotlib.ticker import FixedLocator, FixedFormatter
-import matplotlib.patches as patches
-
-
-SYNC0 = 0xA5
-SYNC1 = 0x5A
-HEADER_FMT = "<BHH"  # version, seq, payload_len
-HEADER_SIZE = struct.calcsize(HEADER_FMT)
-POSE_META_FMT = "<fffHHHH"  # x,y,theta,grid_w,grid_h,cell_mm,path_count
-POSE_META_SIZE = struct.calcsize(POSE_META_FMT)
-CRC_SIZE = 2
-
-# Expected arena/grid defaults (used for display extent and fallback checks)
-DEFAULT_GRID_W = 48
-DEFAULT_GRID_H = 98
-DEFAULT_CELL_MM = 50
-
-#!/usr/bin/env python3
 """
 Live Teensy telemetry visualizer for multiplexed BT packets.
 
@@ -74,6 +36,27 @@ Protocol (binary, resilient framing):
 This script keeps the full grid reconstructed on the PC side from a keyframe plus any deltas.
 It also ignores malformed frames and retries serial disconnects automatically.
 """
+
+from __future__ import annotations
+
+import argparse
+import struct
+import threading
+import time
+import math
+from dataclasses import dataclass
+from queue import Queue, Empty, Full
+from collections import deque
+from typing import Optional
+
+import numpy as np
+import serial
+import serial.tools.list_ports
+
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+import matplotlib.patches as patches
+
 
 SYNC0 = 0xA5
 SYNC1 = 0x5A
@@ -284,6 +267,8 @@ class TelemetryReconstructor:
             return self._apply_heartbeat(packet.payload)
         if packet.packet_type == PACKET_SCAN:
             return self._apply_scan(packet.payload)
+        if packet.packet_type == PACKET_DIAG:
+            return self._apply_diag(packet.payload)
 
         return False
 
@@ -405,19 +390,72 @@ class TelemetryReconstructor:
         return True
 
     def _apply_diag(self, payload: bytes) -> bool:
-        # parse first diagnostic counters from telemetry_send_diag_scan layout
-        # scan_ready_count (u32), scan_telemetry_call_count (u32), scan_telemetry_sent_count (u32), last_scan_point_count (u16)
-        if len(payload) < 14:
+        """Parse packet 0x06 diagnostic telemetry from telemetry_send_diag_scan()."""
+        # Expected payload: 62 bytes
+        # Bytes 0-3: scan_ready_count (u32 LE)
+        # Bytes 4-7: scan_telemetry_call_count (u32 LE)
+        # Bytes 8-11: scan_telemetry_sent_count (u32 LE)
+        # Bytes 12-13: last_scan_point_count (u16 LE)
+        # Bytes 14-15: ld_zero_count (u16 LE)
+        # Bytes 16-17: ld_invalid_count (u16 LE)
+        # Bytes 18-19: ld_min_distance_mm (u16 LE)
+        # Bytes 20-21: ld_max_distance_mm (u16 LE)
+        # Bytes 22-23: ld_large_jump_count (u16 LE)
+        # Bytes 24-25: ld_matched_count (u16 LE)
+        # Bytes 26-27: ld_max_delta_mm (u16 LE)
+        # Bytes 28-29: ld_count_delta_gt_100 (u16 LE)
+        # Bytes 30-31: ld_count_delta_gt_500 (u16 LE)
+        # Bytes 32-33: ld_count_delta_gt_1000 (u16 LE)
+        # Bytes 34-35: ld_angle_of_max_delta_cdeg (u16 LE)
+        # Bytes 36-37: ld_angle_diff_mean_cdeg (u16 LE)
+        # Bytes 38-39: ld_angle_diff_std_cdeg (u16 LE)
+        # Bytes 40-61: LD06 scan-order diagnostics (11 u16 values)
+        
+        if len(payload) < 40:
             return False
-        scan_ready = struct.unpack_from('<I', payload, 0)[0]
-        call_count = struct.unpack_from('<I', payload, 4)[0]
-        sent_count = struct.unpack_from('<I', payload, 8)[0]
-        last_pts = struct.unpack_from('<H', payload, 12)[0]
-        # update state fields so UI shows scan activity
-        self.state.scan_packet_count = int(sent_count)
-        self.state.scan_point_count = int(last_pts)
-        print(f"[visualizer] diag ready={scan_ready} call={call_count} sent={sent_count} pts={last_pts}")
-        return True
+        
+        try:
+            # Core scan counts
+            ready = struct.unpack_from('<I', payload, 0)[0]
+            calls = struct.unpack_from('<I', payload, 4)[0]
+            sent = struct.unpack_from('<I', payload, 8)[0]
+            pts = struct.unpack_from('<H', payload, 12)[0]
+            
+            # LD06 point-level diagnostics
+            zero = struct.unpack_from('<H', payload, 14)[0]
+            invalid = struct.unpack_from('<H', payload, 16)[0]
+            min_mm = struct.unpack_from('<H', payload, 18)[0]
+            max_mm = struct.unpack_from('<H', payload, 20)[0]
+            large_jump = struct.unpack_from('<H', payload, 22)[0]
+            
+            # Angle-matching diagnostics
+            matched = struct.unpack_from('<H', payload, 24)[0]
+            max_delta = struct.unpack_from('<H', payload, 26)[0]
+            delta_gt_100 = struct.unpack_from('<H', payload, 28)[0]
+            delta_gt_500 = struct.unpack_from('<H', payload, 30)[0]
+            delta_gt_1000 = struct.unpack_from('<H', payload, 32)[0]
+            angle_max_delta_cdeg = struct.unpack_from('<H', payload, 34)[0]
+            angle_mean_cdeg = struct.unpack_from('<H', payload, 36)[0]
+            angle_std_cdeg = struct.unpack_from('<H', payload, 38)[0]
+            
+            # Convert centi-degrees to degrees for display
+            angle_max_delta_deg = angle_max_delta_cdeg / 100.0
+            angle_mean_deg = angle_mean_cdeg / 100.0
+            angle_std_deg = angle_std_cdeg / 100.0
+            
+            # Update state fields for UI
+            self.state.scan_packet_count = int(sent)
+            self.state.scan_point_count = int(pts)
+            
+            # Print concise diagnostic line
+            print(f"[scan-diag] ready={ready} calls={calls} sent={sent} pts={pts} "
+                  f"zero={zero} invalid={invalid} min_mm={min_mm} max_mm={max_mm} large_jump={large_jump} "
+                  f"matched={matched} max_delta={max_delta} "
+                  f"angle_max_delta={angle_max_delta_deg:.2f}° angle_mean={angle_mean_deg:.2f}° angle_std={angle_std_deg:.2f}°")
+            
+            return True
+        except struct.error:
+            return False
 
 
 class SerialWorker(threading.Thread):
@@ -545,9 +583,6 @@ class LiveVisualizer:
 
         self.ax.set_aspect("equal", adjustable="box")
         self.ax.grid(True, alpha=0.2)
-        
-        # Configure safe ticker/formatter to prevent log10 errors on extreme values
-        self._setup_safe_tickers()
 
         # Maintain a short trail of past poses
         self._trail = []
@@ -568,20 +603,6 @@ class LiveVisualizer:
             except Exception as e:
                 print(f"[visualizer] failed to open log file {log_path}: {e}")
 
-
-    def _setup_safe_tickers(self) -> None:
-        """Configure axis tickers to prevent log10 errors on extreme values."""
-        try:
-            # Use fixed tickers that don't compute log or deal with edge cases
-            ticks = [0.0, 5.0, 10.0]
-            self.ax.xaxis.set_major_locator(FixedLocator(ticks))
-            self.ax.yaxis.set_major_locator(FixedLocator(ticks))
-            # Simple string formatters
-            labels = ['0', '5', '10']
-            self.ax.xaxis.set_major_formatter(FixedFormatter(labels))
-            self.ax.yaxis.set_major_formatter(FixedFormatter(labels))
-        except Exception as e:
-            print(f"[visualizer] Warning: failed to configure tickers: {e}")
 
     @staticmethod
     def grid_to_rgb(occupancy: np.ndarray, terrain: np.ndarray) -> np.ndarray:
@@ -672,17 +693,11 @@ class LiveVisualizer:
         scan_ang_span_deg = 0.0
         scan_ang_std_deg = 0.0
         if state.lidar_points is not None and state.lidar_points.size > 0:
-            # (angles,distances -> xy around robot) -- TEMPORARY LOCAL-FRAME PLOT
+            # Transform scan to world frame
             angles = state.lidar_points[:, 0]
             dists = state.lidar_points[:, 1]
-            # Original (world) transform kept commented for easy restore:
-            # xs = state.pose_x_m + dists * np.cos(angles + state.pose_theta_rad)
-            # ys = state.pose_y_m + dists * np.sin(angles + state.pose_theta_rad)
-
-            # TEMP: plot in robot-local coordinates (no pose applied)
-            xs = dists * np.cos(angles)
-            ys = dists * np.sin(angles)
-            self.scan_scatter.set_offsets(np.vstack((xs, ys)).T)
+            xs = state.pose_x_m + dists * np.cos(angles + state.pose_theta_rad)
+            ys = state.pose_y_m + dists * np.sin(angles + state.pose_theta_rad)
 
             # Compute centroid of current scan in local frame and record
             try:
@@ -801,20 +816,6 @@ class LiveVisualizer:
         ty = [p[1] for p in self._trail]
         self.trail_line.set_data(tx, ty)
 
-        # Update scan scatter if present (angles,distances -> xy around robot)
-        if state.lidar_points is not None and state.lidar_points.size > 0:
-            angles = state.lidar_points[:, 0]
-            dists = state.lidar_points[:, 1]
-            xs = state.pose_x_m + dists * np.cos(angles + state.pose_theta_rad)
-            ys = state.pose_y_m + dists * np.sin(angles + state.pose_theta_rad)
-            # Validate scan coordinates before plotting
-            if validate_scan_coordinates(xs, ys):
-                self.scan_scatter.set_offsets(np.vstack((xs, ys)).T)
-            else:
-                self.scan_scatter.set_offsets(np.empty((0, 2)))
-        else:
-            self.scan_scatter.set_offsets(np.empty((0, 2)))
-
         # Confidence indicator: simple heuristic (lower is better)
         conf = 1.0 - min(1.0, (state.dropped_frames / 200.0) + (state.tx_queue_depth / 200.0))
         # map to color
@@ -847,22 +848,25 @@ class LiveVisualizer:
                 try:
                     self.update_state(latest)
                 except Exception as e:
-                    print(f"[visualizer] animation tick exception: {e}")
-                    # Continue with previous valid state rather than crashing
-            
-            # Wrap the draw call to catch rendering errors
-            try:
-                self.fig.canvas.draw_idle()
-            except KeyboardInterrupt:
-                # Suppress KeyboardInterrupt from Matplotlib's draw pipeline
-                print("[visualizer] Suppressed rendering exception (KeyboardInterrupt)")
-            except Exception as e:
-                print(f"[visualizer] Canvas draw exception: {e}")
-            
-            return self.img, self.robot_dot, self.heading_line, self.path_line, self.info_text, self.trail_line, self.scan_scatter
+                    print(f"[visualizer] update error: {e}")
 
-        anim = FuncAnimation(self.fig, tick, interval=interval_ms, blit=False, cache_frame_data=False)
-        return anim
+            return (
+                self.img,
+                self.robot_dot,
+                self.heading_line,
+                self.path_line,
+                self.info_text,
+                self.trail_line,
+                self.scan_scatter,
+            )
+
+        return FuncAnimation(
+            self.fig,
+            tick,
+            interval=interval_ms,
+            blit=False,
+            cache_frame_data=False,
+        )
 
 
 def pick_default_port() -> Optional[str]:

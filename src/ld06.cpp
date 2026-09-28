@@ -180,6 +180,7 @@ bool LD06::readScan() {
   // scan has been assembled into _previousScan. This implementation will
   // consume incoming bytes via readData/readDataCRC and report the new-scan
   // flag if set.
+  _newScan = false;
   (void)readData();
   if (_newScan) {
     _newScan = false;
@@ -194,7 +195,6 @@ void LD06::computeData() {
   static float startPhysAngle = 0.0f;      // LD06 starting angle data CW
   // Detection thresholds
   const float WRAP_DEG_THRESHOLD = 300.0f; // drop amount indicating genuine wrap (deg)
-  const uint16_t MIN_POINTS_PER_REV = 100; // minimum points to accept a completed revolution
 
   float angleStep = getAngleStep();
   if (angleStep > LD06_ANGLE_STEP_MAX || angleStep <= 0.0f) {
@@ -223,35 +223,24 @@ void LD06::computeData() {
       float drop = lastPhysAngle - physAngleRaw;
       if (drop > WRAP_DEG_THRESHOLD) {
         // Detected candidate wrap: this point belongs to the next revolution.
-        if (_currentScan->index >= MIN_POINTS_PER_REV) {
-          // FIX: Validate scan before accepting and publishing
-          if (isScanValid(_currentScan)) {
-            // Accept previous scan as complete, swap buffers and analyze
-            _newScan = true;
-            if (_fullScan) {
-              swapBuffers();
-              analyzePreviousScan(_previousScan);
-              // Compute LD06 diagnostics once per completed raw scan.
-              telemetry_update_ld06_diagnostics(_previousScan);
-            }
-          } else {
-            // Scan failed validation; reject and start fresh
-            ld06_diag_rejected_scan_count++;
-            _currentScan->index = 0;  // Clear current scan to retry
-          }
-          #if LD06_DEBUG_ASCII
-          Serial.printf("LD06: wrap accepted, prev_count=%u\n", (unsigned)_previousScan->index);
-          #endif
-          // start fresh on the new current buffer
-          _currentScan->index = 0;
-        } else {
-          // Insufficient points for a full revolution: discard partial
-          // accumulated data and start new scan from this point.
-          #if LD06_DEBUG_ASCII
-          Serial.printf("LD06: wrap detected but insufficient points (%u), discarding partial\n", (unsigned)_currentScan->index);
-          #endif
-          _currentScan->index = 0;
+        // Keep validation as a diagnostic only; do not block scan readiness.
+        if (!isScanValid(_currentScan)) {
+          ld06_diag_rejected_scan_count++;
         }
+
+        // Accept previous scan as complete, swap buffers and analyze.
+        _newScan = true;
+        if (_fullScan) {
+          swapBuffers();
+          analyzePreviousScan(_previousScan);
+          // Compute LD06 diagnostics once per completed raw scan.
+          telemetry_update_ld06_diagnostics(_previousScan);
+        }
+        #if LD06_DEBUG_ASCII
+        Serial.printf("LD06: wrap accepted, prev_count=%u\n", (unsigned)_previousScan->index);
+        #endif
+        // start fresh on the new current buffer
+        _currentScan->index = 0;
         // reset startPhysAngle to the raw angle of the new revolution
         startPhysAngle = physAngleRaw;
       }
@@ -312,19 +301,15 @@ void LD06::computeData() {
 
   // En mode "non full scan", chaque paquet déclenche un swap
   if (!_fullScan) {
-    // FIX: Validate scan quality before publishing in chunk mode
-    if (isScanValid(_currentScan)) {
-      swapBuffers();
-      analyzePreviousScan(_previousScan);
-      // In non-fullScan mode each packet is treated as a completed chunk; update diagnostics.
-      telemetry_update_ld06_diagnostics(_previousScan);
-      _newScan = true;
-    } else {
-      // Chunk failed validation; skip this buffer swap and retry
+    if (!isScanValid(_currentScan)) {
       ld06_diag_rejected_scan_count++;
-      _currentScan->index = 0;  // Clear current buffer to retry
-      _newScan = false;
     }
+
+    swapBuffers();
+    analyzePreviousScan(_previousScan);
+    // In non-fullScan mode each packet is treated as a completed chunk; update diagnostics.
+    telemetry_update_ld06_diagnostics(_previousScan);
+    _newScan = true;
   }
 }
 
@@ -501,6 +486,7 @@ bool LD06::isScanValid(DataPointHandler* scan) {
 }
 
 void LD06::swapBuffers() {
+  _currentBuffer = !_currentBuffer;
   if (_currentBuffer) {
     _currentScan = &_scanB;
     _previousScan = &_scanA;
@@ -508,7 +494,6 @@ void LD06::swapBuffers() {
     _currentScan = &_scanA;
     _previousScan = &_scanB;
   }
-  _currentBuffer = !_currentBuffer;
   _currentScan->index = 0;
 }
 
