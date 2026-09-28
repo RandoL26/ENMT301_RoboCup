@@ -138,6 +138,13 @@
 const uint8_t VL53L1X_SENSOR_COUNT = 1;  // Update this if you add more sensors
 const uint8_t VL53L1X_XSHUT_PINS[VL53L1X_SENSOR_COUNT] = { 18 };  // Update this with the XSHUT pins for each sensor
 
+#define START_BUTTON_PIN 21
+
+bool robotStarted = false;
+bool lastStartButtonState = HIGH;
+unsigned long startButtonDebounceTime = 0;
+const unsigned long START_BUTTON_DEBOUNCE_MS = 50;
+
 // DC Motor PIN definitions
 #define DC_M1_PIN 0              //PWM pin for DC motor control (can be extended to 2 motors)
 #define DC_M2_PIN 1              //PWM pin for DC motor control (can be extended to 2 motors)
@@ -836,6 +843,43 @@ void printfBoth(const char* format, ...) {
     }
 }
 
+void checkStartButton() {
+    bool buttonState = digitalRead(START_BUTTON_PIN);
+
+    // Button pressed: HIGH -> LOW
+    if (lastStartButtonState == HIGH && buttonState == LOW) {
+        unsigned long now = millis();
+
+        if (now - startButtonDebounceTime >= START_BUTTON_DEBOUNCE_MS) {
+            startButtonDebounceTime = now;
+
+            if (!robotStarted) {
+                // Reset mapping
+                mappingNav.reset();
+
+                // Reset fused localisation
+                localisation.resetPose(0.0f, 0.0f, 0.0f);
+
+                // Reset RoboSLAM odometry/state
+                roboSlam.begin();
+
+                // Start robot
+                robotStarted = true;
+
+                // Make absolutely sure motors start stopped
+                cmd_left_motor = 0;
+                cmd_right_motor = 0;
+                applied_left_motor = 0;
+                applied_right_motor = 0;
+
+                Serial.println("START BUTTON PRESSED - MAP/POSE RESET - ROBOT STARTED");
+            }
+        }
+    }
+
+    lastStartButtonState = buttonState;
+}
+
 //**********************************************************************************
 // put your setup code here, to run once:
 //**********************************************************************************
@@ -875,7 +919,7 @@ void pin_init(){
     pinMode(MAGNET_PIN, OUTPUT);
     digitalWrite(MAGNET_PIN, LOW); // ensure off by default
     printlnBoth("Electromagnet pin initialised\n");
-
+    pinMode(START_BUTTON_PIN, INPUT_PULLUP);
     // Pulse electromagnet HIGH for 100 ms for initial test
     printlnBoth("Pulsing electromagnet HIGH for 100 ms\n");
     digitalWrite(MAGNET_PIN, HIGH);
@@ -1033,7 +1077,7 @@ void task_init() {
   // taskManager.addTask(tRead_ultrasonic);   //reading ultrasonic 
   // taskManager.addTask(tRead_infrared);
   // taskManager.addTask(tRead_colour);
-  taskManager.addTask(tRead_imu);          //reading IMU
+//   taskManager.addTask(tRead_imu);          //reading IMU
     // taskManager.addTask(tProximity_sensor);  //reading proximity sensor
     // taskManager.addTask(tUltrasonic_sensor);  //reading ultrasonic sensor
     // taskManager.addTask(tColor_sensor);       //reading color sensor
@@ -1041,8 +1085,8 @@ void task_init() {
     // taskManager.addTask(tVL53L1X_sensor);     //reading VL53L1X sensors
     //taskManager.addTask(tIR_Distance_sensor); //reading IR distance sensor (2Y0A02)  
     // taskManager.addTask(tSensor_average);
-    // taskManager.addTask(tDC_motor);          //DC motor control
-  // taskManager.addTask(tSet_motor); 
+    taskManager.addTask(tDC_motor);          //DC motor control
+//   taskManager.addTask(tSet_motor); 
   // taskManager.addTask(tWeight_scan);
   // taskManager.addTask(tCollect_weight);
   // taskManager.addTask(tReturn_to_base);
@@ -1053,13 +1097,13 @@ void task_init() {
   //taskManager.addTask(tVictory_dance);      
 
     // taskManager.addTask(tHerkulexTest);
-    // taskManager.addTask(tBT_stream_test);  // Disabled for control reliability
+    taskManager.addTask(tBT_stream_test);  // Disabled for control reliability
     // taskManager.addTask(tOpticalFlow);        //reading optical flow sensor
-    taskManager.addTask(tLD06_lidar);          //reading LD06 lidar
-    taskManager.addTask(tLocalisation);        //sensor fusion localisation update
-    taskManager.addTask(tPOI_Detector);        //POI detection from ToF
-    taskManager.addTask(tToF_SearchPlanner);   //search target generation
-    taskManager.addTask(tBig_Servo);
+    // taskManager.addTask(tLD06_lidar);          //reading LD06 lidar
+    // taskManager.addTask(tLocalisation);        //sensor fusion localisation update
+    // taskManager.addTask(tPOI_Detector);        //POI detection from ToF
+    // taskManager.addTask(tToF_SearchPlanner);   //search target generation
+    // taskManager.addTask(tBig_Servo);
     //enable the tasks
   tRead_ultrasonic.enable();
   tRead_infrared.enable();
@@ -1072,18 +1116,18 @@ void task_init() {
   tVL53L1X_sensor.enable();
   tIR_Distance_sensor.enable();
   tSensor_average.enable();
-  //tDC_motor.enable();
-  //tSet_motor.enable();
+  tDC_motor.enable();
+  tSet_motor.enable();
   tWeight_scan.enable();
   tCollect_weight.enable();
   tReturn_to_base.enable();
   tDetect_base.enable();
   tUnload_weights.enable();
-  //tBig_Servo.enable();
- //tCheck_watchdog.enable();
- //tVictory_dance.enable();
+  tBig_Servo.enable();
+//   tCheck_watchdog.enable();
+//   tVictory_dance.enable();
    tHerkulexTest.enable();
-    // tBT_stream_test.enable();  // Disabled for control reliability
+    tBT_stream_test.enable();  // Disabled for control reliability
     tOpticalFlow.enable();
     tLD06_lidar.enable();
     tLocalisation.enable();
@@ -1100,7 +1144,7 @@ void task_init() {
 //**********************************************************************************
 void loop() {
     // LD06 lidar is polled by its scheduled task `tLD06_lidar`.
-
+    checkStartButton();  // Check for start button press and reset if needed
     // Consume inbound Bluetooth control commands continuously
     process_bluetooth_motor_commands();
     // Also accept commands from USB serial monitor (direct wired testing)
