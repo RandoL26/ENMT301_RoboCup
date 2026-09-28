@@ -142,6 +142,8 @@ private:
   bool _currentBuffer = 0;  //
 
   bool _newScan = false;
+  uint16_t _completedScanPoints = 0;
+  bool _scanReadyLatched = false;
   uint16_t _checksumFailCount = 0;
 
   // Reading buffers
@@ -183,7 +185,7 @@ void LD06::setBasePosition(int16_t xPos = 0, int16_t yPos = 0, float anglePos = 
 // Inline getters
 
 uint16_t LD06::getNbPointsInScan() {
-  return _previousScan->index;
+  return _completedScanPoints;
 }
 
 uint16_t LD06::getSpeed() {

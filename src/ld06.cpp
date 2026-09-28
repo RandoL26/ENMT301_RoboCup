@@ -21,6 +21,76 @@ uint16_t ld06_diag_rejected_scan_count = 0;  // Scans rejected due to invalid qu
 uint16_t ld06_diag_backward_angle_count = 0; // Backward angle steps in last scan
 float ld06_diag_last_angular_span = 0.0f;    // Last scan's angular coverage
 
+static_assert(LD06_PTS_PER_PACKETS == 12, "LD06 parser expects 12 measurements per packet");
+static_assert(LD06_PACKET_SIZE == 47, "LD06 parser expects 47-byte packets");
+
+static bool ld06_read_packet_strict(HardwareSerial *serial, uint8_t *pkt) {
+  // Strict sync on 0x54 0x2C, then read the remaining 45 bytes.
+  static bool saw54 = false;
+
+  while (serial->available()) {
+    int b = serial->read();
+    if (b < 0) {
+      break;
+    }
+    uint8_t ub = (uint8_t)b;
+
+    if (!saw54) {
+      if (ub == LD06_HEADER) {
+        saw54 = true;
+      }
+      continue;
+    }
+
+    // saw 0x54 previously; now require strict 0x2C
+    if (ub == LD06_VER_SIZE) {
+      pkt[0] = LD06_HEADER;
+      pkt[1] = LD06_VER_SIZE;
+      const size_t remain = LD06_PACKET_SIZE - 2;  // 45 bytes
+      size_t got = serial->readBytes(pkt + 2, remain);
+      saw54 = false;
+      if (got != remain) {
+        return false;
+      }
+      return true;
+    }
+
+    // Resync: if current byte is another 0x54, keep potential header.
+    saw54 = (ub == LD06_HEADER);
+  }
+
+  return false;
+}
+
+static bool ld06_packet_structurally_valid(const uint8_t *pkt) {
+  const LD06Packet &packet = *reinterpret_cast<const LD06Packet *>(pkt);
+
+  if (packet.header != LD06_HEADER) {
+    return false;
+  }
+  if (packet.version_size != LD06_VER_SIZE) {
+    return false;
+  }
+  if (packet.startAngle > 36000U || packet.endAngle > 36000U) {
+    return false;
+  }
+
+  // Angle-step validity gate: must be physically plausible.
+  float fsa = (float)packet.startAngle / 100.0f;
+  float lsa = (float)packet.endAngle / 100.0f;
+  float range = lsa - fsa;
+  if (range < 0.0f) {
+    range += 360.0f;
+  }
+  float angleStep = range / LD06_PTS_PER_PACKETS;
+  if (!(angleStep > 0.0f && angleStep <= LD06_ANGLE_STEP_MAX)) {
+    return false;
+  }
+
+  // Full packet must contain all 12 measures (enforced by fixed-size strict read).
+  return true;
+}
+
 static void analyzePreviousScan(DataPointHandler *scan) {
   if (!scan) return;
   uint16_t n = scan->index;
@@ -101,6 +171,8 @@ LD06::LD06(HardwareSerial &serial, uint8_t pwmPin)
   _scanB.index = 0;
   _receivedData.index = 0;
   _receivedData.computedCrc = 0;
+  _completedScanPoints = 0;
+  _scanReadyLatched = false;
 }
 
 void LD06::init() {
@@ -123,31 +195,16 @@ bool LD06::readData() {
    return : true if a valid packet is received
 */
 bool LD06::readDataCRC() {
-  // Minimal packet assembler for LD06: look for header byte and read a full
-  // LD06_PACKET_SIZE packet into _receivedData.packet.bytes, then call
-  // computeData() to process the packet. This is a tolerant parser used for
-  // diagnostics; it does not validate CRC strictly but restores scan flow.
-  while (_lidarSerial->available()) {
-    int b = _lidarSerial->read();
-    if (b < 0) break;
-    if ((uint8_t)b != LD06_HEADER) continue;
-    // we found header; attempt to read remaining bytes for a full packet
-    const size_t remain = LD06_PACKET_SIZE - 1;
-    uint8_t pkt[LD06_PACKET_SIZE];
-    pkt[0] = (uint8_t)b;
-    size_t got = 0;
-    // readBytes is provided by Stream
-    got = _lidarSerial->readBytes(pkt + 1, remain);
-    if (got != remain) {
-      // incomplete packet available yet
-      #if LD06_DEBUG_ASCII
-      Serial.println("LD06: incomplete packet read");
-      #endif
-      break;
+  // Strict sync parser: align on 0x54 0x2C, read full packet, validate, then process.
+  // CRC mode currently keeps existing behavior (no strict CRC rejection) unless
+  // CRC implementation is explicitly verified and reintroduced.
+  uint8_t pkt[LD06_PACKET_SIZE];
+  while (ld06_read_packet_strict(_lidarSerial, pkt)) {
+    if (!ld06_packet_structurally_valid(pkt)) {
+      continue;  // discard invalid packet and keep scanning
     }
-    // copy into received packet buffer
+
     memcpy(_receivedData.packet.bytes, pkt, LD06_PACKET_SIZE);
-    // let computeData process the packet and potentially form scan points
     computeData();
     #if LD06_DEBUG_ASCII
     Serial.printf("LD06: packet processed start=%.2f\n", (float)_receivedData.packet.startAngle / 100.0f);
@@ -158,16 +215,13 @@ bool LD06::readDataCRC() {
 }
 
 bool LD06::readDataNoCRC() {
-  // Same packet assembly as CRC mode but without CRC validation.
-  while (_lidarSerial->available()) {
-    int b = _lidarSerial->read();
-    if (b < 0) break;
-    if ((uint8_t)b != LD06_HEADER) continue;
-    const size_t remain = LD06_PACKET_SIZE - 1;
-    uint8_t pkt[LD06_PACKET_SIZE];
-    pkt[0] = (uint8_t)b;
-    size_t got = _lidarSerial->readBytes(pkt + 1, remain);
-    if (got != remain) break;
+  // Same strict framing and structural validation, but no CRC rejection.
+  uint8_t pkt[LD06_PACKET_SIZE];
+  while (ld06_read_packet_strict(_lidarSerial, pkt)) {
+    if (!ld06_packet_structurally_valid(pkt)) {
+      continue;  // discard invalid packet and keep scanning
+    }
+
     memcpy(_receivedData.packet.bytes, pkt, LD06_PACKET_SIZE);
     computeData();
     return true;
@@ -182,8 +236,8 @@ bool LD06::readScan() {
   // flag if set.
   _newScan = false;
   (void)readData();
-  if (_newScan) {
-    _newScan = false;
+  if (_scanReadyLatched) {
+    _scanReadyLatched = false;
     return true;
   }
   return false;
@@ -197,11 +251,16 @@ void LD06::computeData() {
   const float WRAP_DEG_THRESHOLD = 300.0f; // drop amount indicating genuine wrap (deg)
 
   float angleStep = getAngleStep();
+  Serial.printf("LD06 STEP=%.4f start=%.2f end=%.2f\n",
+              angleStep,
+              _receivedData.packet.startAngle / 100.0f,
+              _receivedData.packet.endAngle / 100.0f);
   if (angleStep > LD06_ANGLE_STEP_MAX || angleStep <= 0.0f) {
-    // should not be possible
-    isInit = false;
+    // Invalid packets should be rejected by parser before computeData().
+    // Keep this guard as a fail-safe without resetting initialization state.
     return;
   }
+  
 
   float fsa = _receivedData.packet.startAngle / 100.0f;
 
@@ -228,6 +287,7 @@ void LD06::computeData() {
           ld06_diag_rejected_scan_count++;
         }
 
+        uint16_t completedPoints = _currentScan->index;
         // Accept previous scan as complete, swap buffers and analyze.
         _newScan = true;
         if (_fullScan) {
@@ -236,6 +296,8 @@ void LD06::computeData() {
           // Compute LD06 diagnostics once per completed raw scan.
           telemetry_update_ld06_diagnostics(_previousScan);
         }
+        _completedScanPoints = completedPoints;
+        _scanReadyLatched = true;
         #if LD06_DEBUG_ASCII
         Serial.printf("LD06: wrap accepted, prev_count=%u\n", (unsigned)_previousScan->index);
         #endif
@@ -275,12 +337,24 @@ void LD06::computeData() {
 
     _angles[i] = angle;
 
+    if (isInit) {
+      Serial.printf("LD06 PARSED isInit=%u distance=%u angle=%.2f\n",
+                    (unsigned)isInit,
+                    (unsigned)_receivedData.packet.measures[i].distance,
+                    angle);
+    }
+
     if (isInit && _currentScan->index < LD06_MAX_PTS_SCAN) {
       data.angle     = angle;                                   // Mathematical angle CCW
       data.distance  = _receivedData.packet.measures[i].distance;
       data.intensity = _receivedData.packet.measures[i].intensity;
 
-      if (!_useFiltering || filter(data)) {
+      const bool filterOk = (!_useFiltering || filter(data));
+      Serial.printf("LD06 FILTER isInit=%u filter=%u write=%u\n",
+                    (unsigned)isInit,
+                    (unsigned)filterOk,
+                    (unsigned)filterOk);
+      if (filterOk) {
 #ifdef LD06_COMPUTE_XY
         float angRad = (data.angle + _angularPosition + _angularOffset) * PI / 180.0f;
         float cosPos = cos(_angularPosition * PI / 180.0f);
@@ -295,6 +369,8 @@ void LD06::computeData() {
                  - data.distance * sin(angRad);
 #endif
         _currentScan->points[_currentScan->index++] = data;
+        if (_currentScan->index == 1 || _currentScan->index % 100 == 0)
+            Serial.printf("LD06 WRITE buf=%d index=%u\n", _currentBuffer, _currentScan->index);
       }
     }
   }
@@ -305,10 +381,13 @@ void LD06::computeData() {
       ld06_diag_rejected_scan_count++;
     }
 
+    uint16_t completedPoints = _currentScan->index;
     swapBuffers();
     analyzePreviousScan(_previousScan);
     // In non-fullScan mode each packet is treated as a completed chunk; update diagnostics.
     telemetry_update_ld06_diagnostics(_previousScan);
+    _completedScanPoints = completedPoints;
+    _scanReadyLatched = true;
     _newScan = true;
   }
 }
