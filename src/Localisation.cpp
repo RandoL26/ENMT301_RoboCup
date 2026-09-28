@@ -214,71 +214,21 @@ uint16_t Localisation::scanToMapMatch(LD06 &lidar,
   corr_y_mm = 0.0f;
   corr_theta_rad = 0.0f;
   
-  uint16_t n_pts = lidar.getNbPointsInScan();
+  // LiDAR-based pose correction is not yet implemented.
+  // This is intentionally disabled to avoid false matches.
+  //
+  // A real scan-to-map matcher would:
+  // 1. Transform LiDAR scan to world frame using predicted pose
+  // 2. Compare scan endpoints against occupancy grid
+  // 3. Use iterative closest point (ICP) or similar to find
+  //    the best alignment
+  // 4. Return the correction that minimizes the misalignment
+  // 5. Only accept corrections with high confidence
+  //
+  // Until such a matcher is implemented, we return 0 score
+  // to indicate that LiDAR correction is unavailable.
   
-  // Reject scan if too few points
-  if (n_pts < m_config.lidar_min_valid_points) {
-    return 0;  // No match
-  }
-  
-  // Lightweight scan-to-map correlation:
-  // Count how many LiDAR points align with occupied cells in the occupancy grid.
-  // This is a simple occupancy-grid-based matcher (not full scan-to-map ICP).
-  
-  uint16_t match_count = 0;
-  uint16_t valid_point_count = 0;
-  
-  // Iterate over LiDAR scan points and check if they align with occupancy grid
-  for (uint16_t i = 0; i < n_pts; ++i) {
-    const DataPoint *p = lidar.getPoints(i);
-    if (!p || p->distance == 0 || p->distance > 12000) continue;  // Skip invalid points
-    
-    valid_point_count++;
-    
-    // LiDAR angle in robot frame (degrees -> radians)
-    float ang_rad = p->angle * (PI_F / 180.0f);
-    
-    // Global angle in world frame
-    float global_ang = predicted.theta_rad + ang_rad;
-    
-    // Endpoint of ray in world coordinates (meters)
-    float dist_m = ((float)p->distance) / 1000.0f;
-    float end_x_m = predicted.x_mm / 1000.0f + dist_m * cosf(global_ang);
-    float end_y_m = predicted.y_mm / 1000.0f + dist_m * sinf(global_ang);
-    
-    // Clamp to arena bounds
-    end_x_m = (end_x_m < 0.0f) ? 0.0f : (end_x_m > MappingNav::ARENA_WIDTH_M ? MappingNav::ARENA_WIDTH_M : end_x_m);
-    end_y_m = (end_y_m < 0.0f) ? 0.0f : (end_y_m > MappingNav::ARENA_HEIGHT_M ? MappingNav::ARENA_HEIGHT_M : end_y_m);
-    
-    // Convert to cell coordinates
-    uint16_t cell_x = (uint16_t)(end_x_m / MappingNav::CELL_SIZE_M);
-    uint16_t cell_y = (uint16_t)(end_y_m / MappingNav::CELL_SIZE_M);
-    
-    // Bounds check
-    if (cell_x >= MappingNav::GRID_WIDTH || cell_y >= MappingNav::GRID_HEIGHT) continue;
-    
-    // Check occupancy state at this cell (would need to add getter to MappingNav)
-    // For now, we do a simple heuristic: count valid points as a match
-    // A better implementation would check the actual grid occupancy
-    match_count++;
-  }
-  
-  // If we have very few valid points, reject the match
-  if (valid_point_count < m_config.lidar_min_valid_points) {
-    return 0;
-  }
-  
-  // Match score: percentage of valid points that align
-  uint16_t score = (uint16_t)((match_count * 1000) / valid_point_count);
-  
-  // For now, return conservative zero correction
-  // A real scan matcher would perform iterative closest point (ICP) or similar
-  // This stub preserves fused pose but allows correction framework to be added later
-  corr_x_mm = 0.0f;
-  corr_y_mm = 0.0f;
-  corr_theta_rad = 0.0f;
-  
-  return score;
+  return 0;  // 0 = no correction available
 }
 
 RobotPose Localisation::getPose() const {

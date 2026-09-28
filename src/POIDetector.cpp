@@ -198,7 +198,9 @@ void POIDetector::processAnomaly(const Localisation &loc, float tof_range_m,
     uint32_t now_ms = millis();
     
     // Calculate range difference
-    float range_diff = tof_range_m - expected_range_m;
+    // Positive difference = ToF sees something closer than LiDAR/map expected
+    // This is the anomaly we're looking for (potential weight/object)
+    float range_diff = expected_range_m - tof_range_m;
     
     // If expected range is UNKNOWN or INVALID, don't process as strong anomaly
     if (status == EXPECTED_RANGE_UNKNOWN || status == EXPECTED_RANGE_INVALID) {
@@ -218,8 +220,10 @@ void POIDetector::processAnomaly(const Localisation &loc, float tof_range_m,
                             hit_x_m, hit_y_m);
     
     // Check if this looks like an anomaly
-    if (fabsf(range_diff) < POIConfig::POI_MIN_RANGE_DIFF_M) {
-        // No significant difference; not an anomaly
+    // Only POSITIVE differences are anomalies (ToF closer than expected)
+    // Negative or small differences indicate normal obstacles
+    if (range_diff < POIConfig::POI_MIN_RANGE_DIFF_M) {
+        // No anomaly; ToF either closer or not different enough
         if (m_candidate.state != POI_STATE_NONE) {
             // Candidate exists but this reading doesn't support it
             // Reset or degrade candidate
@@ -229,7 +233,7 @@ void POIDetector::processAnomaly(const Localisation &loc, float tof_range_m,
         return;
     }
     
-    // We have a significant range difference; treat as potential anomaly
+    // We have a significant positive range difference; treat as potential anomaly
     
     if (m_candidate.state == POI_STATE_NONE) {
         // Start new candidate

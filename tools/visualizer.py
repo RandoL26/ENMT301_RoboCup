@@ -7,6 +7,7 @@ import argparse
 import struct
 import threading
 import time
+import math
 from dataclasses import dataclass
 from queue import Queue, Empty, Full
 from collections import deque
@@ -18,6 +19,7 @@ import serial.tools.list_ports
 
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
+from matplotlib.ticker import FixedLocator, FixedFormatter
 import matplotlib.patches as patches
 
 
@@ -104,6 +106,55 @@ DEFAULT_GRID_H = 98
 DEFAULT_CELL_MM = 50
 DEFAULT_ARENA_W_M = 2.4
 DEFAULT_ARENA_H_M = 4.9
+
+
+# ====== Validation Helpers ======
+def is_finite_float(val: float) -> bool:
+    """Check if a float value is finite (not NaN, inf, or -inf)."""
+    try:
+        return math.isfinite(float(val))
+    except (ValueError, TypeError):
+        return False
+
+
+def validate_pose_coordinate(val: float, name: str, max_abs: float = 100.0) -> bool:
+    """Validate that a pose coordinate is finite and within reasonable bounds."""
+    if not is_finite_float(val):
+        print(f"[visualizer] REJECT: invalid pose {name}={val} (not finite)")
+        return False
+    abs_val = abs(float(val))
+    if abs_val > max_abs:
+        print(f"[visualizer] REJECT: pose {name}={val} exceeds max {max_abs}")
+        return False
+    return True
+
+
+def validate_grid_dimensions(grid_w: int, grid_h: int, cell_mm: int) -> bool:
+    """Validate grid metadata before using in display."""
+    if not (1 <= grid_w <= 1000):
+        print(f"[visualizer] REJECT: invalid grid_w={grid_w}")
+        return False
+    if not (1 <= grid_h <= 1000):
+        print(f"[visualizer] REJECT: invalid grid_h={grid_h}")
+        return False
+    if not (1 <= cell_mm <= 10000):
+        print(f"[visualizer] REJECT: invalid cell_mm={cell_mm}")
+        return False
+    return True
+
+
+def validate_scan_coordinates(xs: np.ndarray, ys: np.ndarray) -> bool:
+    """Validate scan point coordinates before plotting."""
+    if xs.size == 0 or ys.size == 0:
+        return True  # Empty scan is okay
+    if not (np.isfinite(xs).all() and np.isfinite(ys).all()):
+        print(f"[visualizer] REJECT: scan has non-finite coordinates")
+        return False
+    max_coord = 100.0  # Reasonable max for arena coordinates in meters
+    if np.any(np.abs(xs) > max_coord) or np.any(np.abs(ys) > max_coord):
+        print(f"[visualizer] REJECT: scan coordinates exceed bounds")
+        return False
+    return True
 
 
 @dataclass
@@ -240,6 +291,16 @@ class TelemetryReconstructor:
         if len(payload) < POSE_SIZE:
             return False
         x_m, y_m, theta_rad, path_count = struct.unpack_from(POSE_FMT, payload, 0)
+        
+        # Validate pose coordinates
+        if not validate_pose_coordinate(x_m, "x"):
+            return False
+        if not validate_pose_coordinate(y_m, "y"):
+            return False
+        if not is_finite_float(theta_rad):
+            print(f"[visualizer] REJECT: invalid theta_rad={theta_rad}")
+            return False
+        
         off = POSE_SIZE
         expected = off + path_count * 2
         if len(payload) < expected:
@@ -252,6 +313,7 @@ class TelemetryReconstructor:
         self.state.pose_y_m = float(y_m)
         self.state.pose_theta_rad = float(theta_rad)
         self.state.path_cells = path_cells
+        print(f"[visualizer] ACCEPT: pose x={x_m:.3f} y={y_m:.3f} theta={theta_rad:.3f}")
         return True
 
     def _apply_keyframe(self, payload: bytes) -> bool:
@@ -259,6 +321,11 @@ class TelemetryReconstructor:
             return False
 
         grid_w, grid_h, cell_mm, packed_len = struct.unpack_from(KEYFRAME_META_FMT, payload, 0)
+        
+        # Validate grid dimensions before processing
+        if not validate_grid_dimensions(int(grid_w), int(grid_h), int(cell_mm)):
+            return False
+        
         n_cells = int(grid_w) * int(grid_h)
         expected = KEYFRAME_META_SIZE + packed_len
         if len(payload) < expected:
@@ -270,6 +337,7 @@ class TelemetryReconstructor:
             occupancy = occupancy.reshape((grid_h, grid_w))
             terrain = terrain.reshape((grid_h, grid_w))
         except ValueError:
+            print(f"[visualizer] REJECT: grid reshape failed for {grid_w}x{grid_h}")
             return False
 
         self.state.grid_w = int(grid_w)
@@ -277,7 +345,7 @@ class TelemetryReconstructor:
         self.state.cell_mm = int(cell_mm)
         self.state.occupancy = occupancy.copy()
         self.state.terrain = terrain.copy()
-        print(f"[visualizer] applied keyframe grid={self.state.grid_w}x{self.state.grid_h} cell_mm={self.state.cell_mm}")
+        print(f"[visualizer] ACCEPT: keyframe grid={self.state.grid_w}x{self.state.grid_h} cell_mm={self.state.cell_mm}")
         return True
 
     def _apply_delta(self, payload: bytes) -> bool:
@@ -477,6 +545,9 @@ class LiveVisualizer:
 
         self.ax.set_aspect("equal", adjustable="box")
         self.ax.grid(True, alpha=0.2)
+        
+        # Configure safe ticker/formatter to prevent log10 errors on extreme values
+        self._setup_safe_tickers()
 
         # Maintain a short trail of past poses
         self._trail = []
@@ -496,6 +567,21 @@ class LiveVisualizer:
                 self._log_fh.write("timestamp,seq,scan_pts,scan_jitter_cm,scan_dd_mm,scan_da_deg,scan_max_dd_mm,scan_large_dd_count,scan_ang_span_deg,scan_ang_std_deg,pose_theta_std_deg\n")
             except Exception as e:
                 print(f"[visualizer] failed to open log file {log_path}: {e}")
+
+
+    def _setup_safe_tickers(self) -> None:
+        """Configure axis tickers to prevent log10 errors on extreme values."""
+        try:
+            # Use fixed tickers that don't compute log or deal with edge cases
+            ticks = [0.0, 5.0, 10.0]
+            self.ax.xaxis.set_major_locator(FixedLocator(ticks))
+            self.ax.yaxis.set_major_locator(FixedLocator(ticks))
+            # Simple string formatters
+            labels = ['0', '5', '10']
+            self.ax.xaxis.set_major_formatter(FixedFormatter(labels))
+            self.ax.yaxis.set_major_formatter(FixedFormatter(labels))
+        except Exception as e:
+            print(f"[visualizer] Warning: failed to configure tickers: {e}")
 
     @staticmethod
     def grid_to_rgb(occupancy: np.ndarray, terrain: np.ndarray) -> np.ndarray:
@@ -518,15 +604,44 @@ class LiveVisualizer:
     def update_state(self, state: TelemetryState) -> None:
         self.state = state
 
+        # Validate pose before plotting
+        if not (validate_pose_coordinate(state.pose_x_m, "x") and 
+                validate_pose_coordinate(state.pose_y_m, "y") and
+                is_finite_float(state.pose_theta_rad)):
+            print(f"[visualizer] Skipping render due to invalid pose")
+            return
+
         if state.occupancy is not None and state.terrain is not None:
+            if not validate_grid_dimensions(state.grid_w, state.grid_h, state.cell_mm):
+                print(f"[visualizer] Skipping grid render due to invalid dimensions")
+                return
+            
             cell_m = state.cell_mm / 1000.0
             width_m = state.grid_w * cell_m
             height_m = state.grid_h * cell_m
+            
+            # Validate computed extents
+            if not (is_finite_float(width_m) and is_finite_float(height_m)):
+                print(f"[visualizer] Skipping grid render: computed extents invalid")
+                return
+            
             rgb = self.grid_to_rgb(state.occupancy, state.terrain)
             self.img.set_data(rgb)
             self.img.set_extent([0.0, width_m, 0.0, height_m])
-            self.ax.set_xlim(0.0, width_m)
-            self.ax.set_ylim(0.0, height_m)
+            
+            # Set explicit axis limits with safety margins to avoid ticker extremes
+            margin = 0.2
+            safe_xmin = max(0.0, -margin)
+            safe_xmax = min(width_m + margin, 1000.0)  # Cap at 1000m to avoid extreme tickers
+            safe_ymin = max(0.0, -margin)
+            safe_ymax = min(height_m + margin, 1000.0)
+            
+            self.ax.set_xlim(safe_xmin, safe_xmax)
+            self.ax.set_ylim(safe_ymin, safe_ymax)
+        else:
+            # Default safe limits when no grid data
+            self.ax.set_xlim(0.0, DEFAULT_ARENA_W_M)
+            self.ax.set_ylim(0.0, DEFAULT_ARENA_H_M)
 
         self.robot_dot.set_data([state.pose_x_m], [state.pose_y_m])
 
@@ -539,7 +654,11 @@ class LiveVisualizer:
             cell_m = state.cell_mm / 1000.0
             px = (state.path_cells[:, 0].astype(np.float32) + 0.5) * cell_m
             py = (state.path_cells[:, 1].astype(np.float32) + 0.5) * cell_m
-            self.path_line.set_data(px, py)
+            # Validate path coordinates
+            if validate_scan_coordinates(px, py):
+                self.path_line.set_data(px, py)
+            else:
+                self.path_line.set_data([], [])
         else:
             self.path_line.set_data([], [])
 
@@ -688,7 +807,11 @@ class LiveVisualizer:
             dists = state.lidar_points[:, 1]
             xs = state.pose_x_m + dists * np.cos(angles + state.pose_theta_rad)
             ys = state.pose_y_m + dists * np.sin(angles + state.pose_theta_rad)
-            self.scan_scatter.set_offsets(np.vstack((xs, ys)).T)
+            # Validate scan coordinates before plotting
+            if validate_scan_coordinates(xs, ys):
+                self.scan_scatter.set_offsets(np.vstack((xs, ys)).T)
+            else:
+                self.scan_scatter.set_offsets(np.empty((0, 2)))
         else:
             self.scan_scatter.set_offsets(np.empty((0, 2)))
 
@@ -721,10 +844,25 @@ class LiveVisualizer:
                 except Empty:
                     break
             if latest is not None:
-                self.update_state(latest)
+                try:
+                    self.update_state(latest)
+                except Exception as e:
+                    print(f"[visualizer] animation tick exception: {e}")
+                    # Continue with previous valid state rather than crashing
+            
+            # Wrap the draw call to catch rendering errors
+            try:
+                self.fig.canvas.draw_idle()
+            except KeyboardInterrupt:
+                # Suppress KeyboardInterrupt from Matplotlib's draw pipeline
+                print("[visualizer] Suppressed rendering exception (KeyboardInterrupt)")
+            except Exception as e:
+                print(f"[visualizer] Canvas draw exception: {e}")
+            
             return self.img, self.robot_dot, self.heading_line, self.path_line, self.info_text, self.trail_line, self.scan_scatter
 
-        return FuncAnimation(self.fig, tick, interval=interval_ms, blit=False)
+        anim = FuncAnimation(self.fig, tick, interval=interval_ms, blit=False, cache_frame_data=False)
+        return anim
 
 
 def pick_default_port() -> Optional[str]:

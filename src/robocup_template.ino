@@ -46,6 +46,7 @@
 #include "POIDetector.h"             // ToF-based POI/weight detection
 #include "ToFCoverageMap.h"          // ToF coverage tracking
 #include "ToFSearchPlanner.h"        // Search target generation
+#include "ToFGeometry.h"             // Shared ToF sensor geometry
 #include "telemetry.h"
 
 // Gate legacy ASCII Teleplot / diagnostic prints so they don't corrupt
@@ -95,12 +96,6 @@
 #define POI_DETECTOR_UPDATE_NUM_EXECUTE     -1
 
 #define TOF_SEARCH_PLANNER_PERIOD           500  // 2 Hz: generate search targets less frequently
-#define TOF_SEARCH_PLANNER_NUM_EXECUTE      -1
-
-#define POI_DETECTOR_UPDATE_PERIOD          100  // 10 Hz: process ToF readings
-#define POI_DETECTOR_UPDATE_NUM_EXECUTE     -1
-
-#define TOF_SEARCH_PLANNER_PERIOD           1000  // 1 Hz: generate search targets
 #define TOF_SEARCH_PLANNER_NUM_EXECUTE      -1
 
 #define HERKULEX_TEST_PERIOD               1200
@@ -222,6 +217,17 @@ POIDetector poiDetector;
 ToFCoverageMap tofCoverageMap;
 ToFSearchPlanner searchPlanner;
 
+// ToF sensor calibration (MUST BE CALIBRATED FOR YOUR ROBOT)
+ToFExtrinsics tof_extrinsics = {0.0f, 0.0f, 0.0f};  // x_offset_m, y_offset_m, yaw_offset_rad
+
+// Additional diagnostic counters for testing
+uint32_t optical_flow_update_count = 0;  // Tracks optical flow updates
+uint32_t tof_reading_count = 0;          // Tracks ToF readings processed
+uint32_t poi_candidate_count = 0;        // Tracks POI candidates created
+uint32_t poi_confirmed_count = 0;        // Tracks confirmed POIs
+
+// Note: scan_ready_count, scan_telemetry_call_count, last_scan_point_count are defined in telemetry.cpp
+
 // CH9143 Bluetooth instance
 CH9143Bluetooth bluetooth(&Serial7, BLUETOOTH_RX_PIN, BLUETOOTH_TX_PIN, BLUETOOTH_BAUD);
 
@@ -295,6 +301,7 @@ void optical_flow_callback(void) {
         opticalFlow.addMotionCounts(dx, dy);
         float tx = opticalFlow.getTotalXmm();
         float ty = opticalFlow.getTotalYmm();
+        optical_flow_update_count++;  // DIAGNOSTIC
         printfBoth("OpticalFlow totalX: %.2f mm  totalY: %.2f mm\n", tx, ty);
         // Update localisation with optical flow
         localisation.updateOpticalFlow(opticalFlow);
@@ -369,6 +376,7 @@ void vl53l1x_sensor_callback(void) {
 void poi_detector_callback(void) {
     if (tofSensorArray.isInitialized()) {
         TOFSensorArray::TOFData tofData = tofSensorArray.readDistances();
+        tof_reading_count++;  // DIAGNOSTIC
         
         // Get latest ToF reading (assume single sensor for now)
         float tof_distance_m = (tofData.sensorCount > 0) ? (tofData.distances[0] / 1000.0f) : 0.0f;
@@ -379,9 +387,9 @@ void poi_detector_callback(void) {
         // Update ToF coverage map if reading is valid
         if (tof_distance_m > 0.0f) {
             RobotPose pose = localisation.getPose();
-            float sensor_x_m = pose.x_mm / 1000.0f;
-            float sensor_y_m = pose.y_mm / 1000.0f;
-            float sensor_yaw_rad = pose.theta_rad;  // Simplified: no offset
+            float sensor_x_m, sensor_y_m, sensor_yaw_rad;
+            ToFGeometry::getSensorWorldFrame(pose, tof_extrinsics,
+                                             sensor_x_m, sensor_y_m, sensor_yaw_rad);
             tofCoverageMap.markBeamCovered(sensor_x_m, sensor_y_m, sensor_yaw_rad, tof_distance_m);
         }
     }
@@ -395,11 +403,17 @@ void tof_search_planner_callback(void) {
         return;
     }
     
-    // Generate candidate poses
+    // Generate candidate poses using authoritative fused pose
     const uint16_t MAX_CANDIDATES = 30;
     SearchCandidate candidates[MAX_CANDIDATES];
     
-    MappingNav::Pose2D current_pose = mappingNav.getPose();
+    // Use fused Localisation pose, not MappingNav's separate pose
+    RobotPose fused_pose = localisation.getPose();
+    MappingNav::Pose2D current_pose;
+    current_pose.x_m = fused_pose.x_mm / 1000.0f;
+    current_pose.y_m = fused_pose.y_mm / 1000.0f;
+    current_pose.theta_rad = fused_pose.theta_rad;
+    
     uint16_t candidate_count = searchPlanner.generateCandidates(
         current_pose, tofCoverageMap, mappingNav, candidates, MAX_CANDIDATES);
     
@@ -413,7 +427,16 @@ void tof_search_planner_callback(void) {
     // Extract best candidate pose
     SearchCandidate &best = candidates[best_idx];
     
-    // [TODO: Issue navigation goal to D* Lite pathfinder]
+    // Synchronize MappingNav's internal pose with fused pose before pathfinding
+    mappingNav.setPose(current_pose.x_m, current_pose.y_m, current_pose.theta_rad);
+    
+    // Issue navigation goal to D* Lite pathfinder
+    bool goal_set = mappingNav.setGoalWorld(best.x_m, best.y_m);
+    if (!goal_set) {
+        // Goal is unreachable or outside arena
+        return;
+    }
+    
     // For now, just print diagnostics
     #if TELEMETRY_ALLOW_ASCII_TELEPLOT
     Serial.printf("POI_SEARCH: target=(%.2f, %.2f, %.2f) coverage=%.1f%% score=%.0f\n",
@@ -981,7 +1004,6 @@ void robot_init() {
         
         // Initialize POI detection system
         printlnBoth("Initialising POI Detector...");
-        ToFExtrinsics tof_extrinsics;
         // CALIBRATION REQUIRED: Measure your robot's ToF mounting offset
         tof_extrinsics.x_offset_m = 0.0f;   // TODO: measure forward offset from robot center
         tof_extrinsics.y_offset_m = 0.0f;   // TODO: measure lateral offset
