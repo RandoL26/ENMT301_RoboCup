@@ -1296,6 +1296,7 @@ void loop() {
     static unsigned long last_hb_ms = 0;
     static unsigned long last_pose_ms = 0;
     static unsigned long last_grid_ms = 0;
+    static unsigned long last_inflated_grid_ms = 0;
 
     unsigned long now = millis();
 
@@ -1319,6 +1320,10 @@ void loop() {
     if (now - last_grid_ms >= 1500) {
         telemetry_send_grid_keyframe(mappingNav);
         last_grid_ms = now;
+    }
+    if (now - last_inflated_grid_ms >= 1500) {
+        telemetry_send_inflated_grid(mappingNav);
+        last_inflated_grid_ms = now;
     }
 }
 

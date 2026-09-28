@@ -562,3 +562,61 @@ void telemetry_send_status(
     );
 }
 
+void telemetry_send_inflated_grid(const MappingNav &nav)
+{
+    const uint8_t *grid = nav.getInflatedGridData();
+
+    const uint16_t width = MappingNav::GRID_WIDTH;
+    const uint16_t height = MappingNav::GRID_HEIGHT;
+    const uint16_t cell_mm =
+        (uint16_t)(MappingNav::CELL_SIZE_M * 1000.0f);
+
+    const uint16_t grid_size = width * height;
+
+    /*
+     * Payload:
+     *
+     * width       u16
+     * height      u16
+     * cell_mm     u16
+     * grid_size   u16
+     * grid        1 byte/cell
+     */
+
+    const uint16_t payload_len = 8 + grid_size;
+
+    uint8_t *payload =
+        (uint8_t *)malloc(payload_len);
+
+    if (!payload)
+        return;
+
+    uint8_t *ptr = payload;
+
+    *ptr++ = (uint8_t)(width & 0xFF);
+    *ptr++ = (uint8_t)((width >> 8) & 0xFF);
+
+    *ptr++ = (uint8_t)(height & 0xFF);
+    *ptr++ = (uint8_t)((height >> 8) & 0xFF);
+
+    *ptr++ = (uint8_t)(cell_mm & 0xFF);
+    *ptr++ = (uint8_t)((cell_mm >> 8) & 0xFF);
+
+    *ptr++ = (uint8_t)(grid_size & 0xFF);
+    *ptr++ = (uint8_t)((grid_size >> 8) & 0xFF);
+
+    memcpy(
+        ptr,
+        grid,
+        grid_size
+    );
+
+    send_frame(
+        1,
+        PACKET_INFLATED_GRID,
+        payload,
+        payload_len
+    );
+
+    free(payload);
+}

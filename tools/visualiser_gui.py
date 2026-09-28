@@ -50,6 +50,8 @@ PACKET_GRID_DELTA = 0x03
 PACKET_HEARTBEAT = 0x04
 PACKET_SCAN = 0x05
 PACKET_DIAG = 0x06
+PACKET_STATUS = 0x07
+PACKET_INFLATED_GRID = 0x08
 
 POSE_FMT = "<fffH"
 POSE_SIZE = 14
@@ -113,6 +115,7 @@ class TelemetryState:
 
     occupancy: Optional[np.ndarray] = None
     terrain: Optional[np.ndarray] = None
+    inflated_grid: Optional[np.ndarray] = None
 
     path_cells: Optional[np.ndarray] = None
 
@@ -124,7 +127,6 @@ class TelemetryState:
 
     scan_packet_count: int = 0
     scan_point_count: int = 0
-
 
 # ============================================================
 # TELEMETRY PACKET
@@ -300,6 +302,12 @@ class TelemetryReconstructor:
 
         if packet.packet_type == PACKET_SCAN:
             return self.scan(packet.payload)
+
+        if packet.packet_type == PACKET_DIAG:
+            return False
+
+        if packet.packet_type == PACKET_INFLATED_GRID:
+            return self._apply_inflated_grid(packet.payload)
 
         return False
 
@@ -487,6 +495,8 @@ class TelemetryReconstructor:
             .terrain
             .reshape(-1)
         )
+
+
 
         for _ in range(count):
 
@@ -711,6 +721,12 @@ class SerialWorker(threading.Thread):
                 None
                 if state.terrain is None
                 else state.terrain.copy()
+            ),
+
+            inflated_grid=(
+                None
+                if state.inflated_grid is None
+                else state.inflated_grid.copy()
             ),
 
             path_cells=(
@@ -1159,6 +1175,22 @@ class RoboCupVisualizer(QMainWindow):
             reset_button
         )
 
+        # ----------------------------------------------------
+        # RESET DATA
+        # ----------------------------------------------------
+
+        reset_data_button = QPushButton(
+            "RESET DATA"
+        )
+
+        reset_data_button.clicked.connect(
+            self.reset_data
+        )
+
+        view_layout.addWidget(
+            reset_data_button
+        )
+
         side_layout.addWidget(
             view_group
         )
@@ -1177,6 +1209,16 @@ class RoboCupVisualizer(QMainWindow):
 
         self.grid_image.setZValue(
             0
+        )
+
+        self.inflated_image = pg.ImageItem()
+
+        self.plot.addItem(
+            self.inflated_image
+        )
+
+        self.inflated_image.setZValue(
+            1
         )
 
         self.path_item = pg.PlotDataItem(
@@ -1336,10 +1378,9 @@ class RoboCupVisualizer(QMainWindow):
             self.cb_inflated.isChecked()
         )
 
-        # Real inflated occupancy should eventually
-        # come from MappingNav telemetry.
-        #
-        # For now this toggle is reserved for that layer.
+        self.inflated_image.setVisible(
+            self.show_inflated
+        )
 
     def toggle_lidar(self):
 
@@ -1466,6 +1507,71 @@ class RoboCupVisualizer(QMainWindow):
             padding=0.03,
         )
 
+    def reset_data(self):
+
+        # Clear telemetry state
+        self.state = TelemetryState()
+
+        # Clear trail
+        self.trail.clear()
+
+        # Clear goal
+        self.goal = None
+
+        # Clear map
+        self.grid_image.clear()
+
+        # Clear path
+        self.path_item.clear()
+
+        # Clear trail display
+        self.trail_item.clear()
+
+        # Clear LiDAR
+        self.lidar_item.clear()
+
+        # Clear robot
+        self.robot_item.clear()
+
+        # Clear heading
+        self.heading_item.clear()
+
+        # Clear start/goal markers
+        self.start_item.clear()
+        self.goal_item.clear()
+
+        # Reset status displays
+        self.robot_label.setText(
+            "START:  --\n"
+            "X:      --\n"
+            "Y:      --\n"
+            "HEADING:--\n"
+            "SPEED:  --"
+        )
+
+        self.planner_label.setText(
+            "STATE:  --\n"
+            "GOAL:   --\n"
+            "PATH:   --\n"
+            "GRID:   --"
+        )
+
+        self.motor_label.setText(
+            "LEFT:  --\n"
+            "RIGHT: --"
+        )
+
+        self.telemetry_label.setText(
+            "SEQ:       --\n"
+            "SCAN PTS:  --\n"
+            "QUEUE:     --\n"
+            "DROPPED:   --\n"
+            "UPTIME:    --"
+        )
+
+        # Reset camera as well
+        self.reset_view()
+
     # ========================================================
     # UPDATE VISUALIZER
     # ========================================================
@@ -1548,6 +1654,51 @@ class RoboCupVisualizer(QMainWindow):
             )
 
             self.grid_image.setRect(
+                0,
+                0,
+                width,
+                height,
+            )
+
+        if (
+            state.inflated_grid is not None
+            and self.show_inflated
+        ):
+
+            inflated = (
+                state.inflated_grid
+            )
+
+            image = np.zeros(
+                (
+                    state.grid_h,
+                    state.grid_w,
+                ),
+                dtype=np.uint8,
+            )
+
+            image[
+                inflated != 0
+            ] = 180
+
+            self.inflated_image.setImage(
+                image.T,
+                autoLevels=False,
+            )
+
+            width = (
+                state.grid_w
+                * state.cell_mm
+                / 1000.0
+            )
+
+            height = (
+                state.grid_h
+                * state.cell_mm
+                / 1000.0
+            )
+
+            self.inflated_image.setRect(
                 0,
                 0,
                 width,
