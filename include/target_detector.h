@@ -69,7 +69,7 @@ struct SensorMount {
 struct TieredTargetDetectorConfig {
     // --- Tier geometry validation (raw sensor-to-crossing distance, same
     //     role these fields had before -- used by pairMatch()) ---
-    uint16_t nearIntersectMm = 150;
+    uint16_t nearIntersectMm = 100;
     uint16_t farIntersectMm = 175;
     uint16_t targetHeightMm = 70;
     uint16_t targetHeightToleranceMm = 20;
@@ -77,7 +77,7 @@ struct TieredTargetDetectorConfig {
     uint16_t intersectionToleranceMm = 75;
 
     // --- TOF <-> lidar comparison (replaces the old top-sensor fields) ---
-    uint16_t maxDetectionRangeMm = 600;    // hard cap: ignore TOF readings beyond this
+    uint16_t maxDetectionRangeMm = 700;    // hard cap: ignore TOF readings beyond this
     uint16_t lidarMatchToleranceMm = 60;   // |tofDist - lidarDist| <= this => same surface => Obstacle
     float lidarBearingToleranceDeg = 1.0f; // matching window for the lidar lookup at a given bearing
                                             // (LD06 does 4500 samples/sec over 360 deg, so this can

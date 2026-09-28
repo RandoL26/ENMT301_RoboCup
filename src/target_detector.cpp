@@ -10,7 +10,7 @@ namespace {
 // From your message, taken as the RAW sensor-to-crossing distance (same
 // quantity pairMatch() has always compared against):
 //   - far tier  (front, mounting line = the origin, x = 0 mm): 175 mm
-//   - near tier (mounted 30 mm behind the origin):              150 mm
+//   - near tier (mounted 30 mm behind the origin):              100 mm
 // That puts the far tier's crossing point further from the robot than the
 // near tier's once the near tier's 30mm setback is applied (175mm vs
 // ~120mm along the centerline) -- so "far"/"near" here follows the net
@@ -24,7 +24,7 @@ namespace {
 // plausible but unverified). Once you have the real spacing, change just
 // these two constants -- every mount position/angle below recomputes itself.
 constexpr float HALF_SPACING_FAR_MM  = 87.5f;  // PLACEHOLDER -- half the far-tier L/R spacing
-constexpr float HALF_SPACING_NEAR_MM = 75.0f;  // PLACEHOLDER -- half the near-tier L/R spacing
+constexpr float HALF_SPACING_NEAR_MM = 50.0f;  // PLACEHOLDER -- half the near-tier L/R spacing
 
 constexpr float FAR_TIER_X_MM  = 0.0f;
 constexpr float NEAR_TIER_X_MM = -30.0f;

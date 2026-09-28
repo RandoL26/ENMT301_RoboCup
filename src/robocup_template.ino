@@ -961,9 +961,9 @@ void robot_init() {
     }
 
     TieredTargetDetectorConfig targetConfig;
-    targetConfig.nearIntersectMm = 300;
-    targetConfig.farIntersectMm = 500;
-    targetConfig.intersectionToleranceMm = 35;
+    targetConfig.nearIntersectMm = 200;
+    targetConfig.farIntersectMm = 400;
+    targetConfig.intersectionToleranceMm = 50;
     // Map the prior "top sensor" semantics into the new lidar-based
     // config: treat the old clearance/reject-margin as an expected
     // target height and tolerance, and tighten lidar matching accordingly.
