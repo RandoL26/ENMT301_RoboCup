@@ -1,33 +1,5 @@
 #!/usr/bin/env python3
-"""
-Live occupancy-grid + D* path visualizer for Teensy serial telemetry.
-
-Protocol assumptions (binary, robust framing):
-- Sync bytes: 0xA5 0x5A
-- Header (little-endian):
-    u8  version
-    u16 sequence
-    u16 payload_len
-- Payload:
-    f32 pose_x_m
-    f32 pose_y_m
-    f32 pose_theta_rad
-    u16 grid_w
-    u16 grid_h
-    u16 cell_mm
-    u16 path_count
-    grid_packed[(grid_w*grid_h+1)//2]  # two cells per byte
-      nibble bits: [1:0]=occupancy (0 unknown,1 free,2 occupied), [3:2]=terrain (0 flat,1 ramp,2 speed bump)
-    path[path_count] where each waypoint is:
-      u8 cx
-      u8 cy
-- Footer:
-    u16 crc16_ccitt (computed over: version..payload_end, NOT including sync)
-
-Notes:
-- This parser tolerates noise/partial frames by scanning for sync and CRC-checking each candidate frame.
-- If serial disconnects, it retries automatically.
-"""
+"""Visualiser for Teensy mapping telemetry (binary framed protocol 0xA5 0x5A)."""
 
 from __future__ import annotations
 
@@ -37,6 +9,7 @@ import threading
 import time
 from dataclasses import dataclass
 from queue import Queue, Empty, Full
+from collections import deque
 from typing import Optional
 
 import numpy as np
@@ -45,6 +18,7 @@ import serial.tools.list_ports
 
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
+import matplotlib.patches as patches
 
 
 SYNC0 = 0xA5
@@ -99,24 +73,6 @@ This script keeps the full grid reconstructed on the PC side from a keyframe plu
 It also ignores malformed frames and retries serial disconnects automatically.
 """
 
-from __future__ import annotations
-
-import argparse
-import struct
-import threading
-import time
-from dataclasses import dataclass
-from queue import Queue, Empty, Full
-from typing import Optional
-
-import numpy as np
-import serial
-import serial.tools.list_ports
-
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
-
-
 SYNC0 = 0xA5
 SYNC1 = 0x5A
 VERSION = 1
@@ -129,6 +85,8 @@ PACKET_POSE_PATH = 0x01
 PACKET_GRID_KEYFRAME = 0x02
 PACKET_GRID_DELTA = 0x03
 PACKET_HEARTBEAT = 0x04
+PACKET_SCAN = 0x05
+PACKET_DIAG = 0x06
 
 POSE_FMT = "<fffH"
 POSE_SIZE = struct.calcsize(POSE_FMT)
@@ -138,6 +96,8 @@ DELTA_META_FMT = "<H"
 DELTA_META_SIZE = struct.calcsize(DELTA_META_FMT)
 HEARTBEAT_FMT = "<IHH"
 HEARTBEAT_SIZE = struct.calcsize(HEARTBEAT_FMT)
+SCAN_META_FMT = "<H"  # point_count
+SCAN_META_SIZE = struct.calcsize(SCAN_META_FMT)
 
 DEFAULT_GRID_W = 48
 DEFAULT_GRID_H = 98
@@ -161,6 +121,11 @@ class TelemetryState:
     uptime_ms: int = 0
     tx_queue_depth: int = 0
     dropped_frames: int = 0
+    # Optional latest lidar scan points as Nx2 array (angle_rad, distance_m)
+    lidar_points: Optional[np.ndarray] = None
+    # Scan counters
+    scan_packet_count: int = 0
+    scan_point_count: int = 0
 
 
 @dataclass
@@ -184,10 +149,19 @@ def crc16_ccitt(data: bytes, init: int = 0xFFFF) -> int:
 
 def decode_packed_grid(packed: bytes, n_cells: int) -> tuple[np.ndarray, np.ndarray]:
     arr = np.frombuffer(packed, dtype=np.uint8)
-    cells = np.empty(arr.size * 2, dtype=np.uint8)
-    cells[0::2] = arr & 0x0F
-    cells[1::2] = (arr >> 4) & 0x0F
-    cells = cells[:n_cells]
+    # Support two packing formats:
+    # - Legacy: two 4-bit cells per byte (low nibble = cell0, high nibble = cell1)
+    # - Current firmware: one byte per cell
+    if arr.size == n_cells:
+        # one byte per cell
+        cells = arr.copy()
+    else:
+        # assume packed nibble format
+        cells = np.empty(arr.size * 2, dtype=np.uint8)
+        cells[0::2] = arr & 0x0F
+        cells[1::2] = (arr >> 4) & 0x0F
+        cells = cells[:n_cells]
+
     occupancy = cells & 0x03
     terrain = (cells >> 2) & 0x03
     return occupancy, terrain
@@ -257,6 +231,8 @@ class TelemetryReconstructor:
             return self._apply_delta(packet.payload)
         if packet.packet_type == PACKET_HEARTBEAT:
             return self._apply_heartbeat(packet.payload)
+        if packet.packet_type == PACKET_SCAN:
+            return self._apply_scan(packet.payload)
 
         return False
 
@@ -301,6 +277,7 @@ class TelemetryReconstructor:
         self.state.cell_mm = int(cell_mm)
         self.state.occupancy = occupancy.copy()
         self.state.terrain = terrain.copy()
+        print(f"[visualizer] applied keyframe grid={self.state.grid_w}x{self.state.grid_h} cell_mm={self.state.cell_mm}")
         return True
 
     def _apply_delta(self, payload: bytes) -> bool:
@@ -323,15 +300,55 @@ class TelemetryReconstructor:
                 continue
             flat_occ[idx] = packed_cell & 0x03
             flat_ter[idx] = (packed_cell >> 2) & 0x03
+        print(f"[visualizer] applied delta changes={change_count}")
         return True
 
     def _apply_heartbeat(self, payload: bytes) -> bool:
-        if len(payload) < HEARTBEAT_SIZE:
+            if len(payload) < HEARTBEAT_SIZE:
+                return False
+            uptime_ms, tx_queue_depth, dropped_frames = struct.unpack_from(HEARTBEAT_FMT, payload, 0)
+            self.state.uptime_ms = int(uptime_ms)
+            self.state.tx_queue_depth = int(tx_queue_depth)
+            self.state.dropped_frames = int(dropped_frames)
+            # Optional extended fields: scan_packet_count (u16), scan_point_count (u16)
+            if len(payload) >= HEARTBEAT_SIZE + 4:
+                scan_pkt, scan_pts = struct.unpack_from('<HH', payload, HEARTBEAT_SIZE)
+                self.state.scan_packet_count = int(scan_pkt)
+                self.state.scan_point_count = int(scan_pts)
+            return True
+
+    def _apply_scan(self, payload: bytes) -> bool:
+        if len(payload) < SCAN_META_SIZE:
             return False
-        uptime_ms, tx_queue_depth, dropped_frames = struct.unpack_from(HEARTBEAT_FMT, payload, 0)
-        self.state.uptime_ms = int(uptime_ms)
-        self.state.tx_queue_depth = int(tx_queue_depth)
-        self.state.dropped_frames = int(dropped_frames)
+        point_count = struct.unpack_from(SCAN_META_FMT, payload, 0)[0]
+        off = SCAN_META_SIZE
+        expected = off + point_count * 8
+        if len(payload) < expected:
+            return False
+
+        arr = np.frombuffer(payload[off:expected], dtype=np.float32)
+        if arr.size != point_count * 2:
+            return False
+        pts = arr.reshape((-1, 2)).copy()
+        # update lidar points and counters
+        self.state.lidar_points = pts
+        self.state.scan_packet_count = getattr(self.state, 'scan_packet_count', 0) + 1
+        self.state.scan_point_count = pts.shape[0]
+        return True
+
+    def _apply_diag(self, payload: bytes) -> bool:
+        # parse first diagnostic counters from telemetry_send_diag_scan layout
+        # scan_ready_count (u32), scan_telemetry_call_count (u32), scan_telemetry_sent_count (u32), last_scan_point_count (u16)
+        if len(payload) < 14:
+            return False
+        scan_ready = struct.unpack_from('<I', payload, 0)[0]
+        call_count = struct.unpack_from('<I', payload, 4)[0]
+        sent_count = struct.unpack_from('<I', payload, 8)[0]
+        last_pts = struct.unpack_from('<H', payload, 12)[0]
+        # update state fields so UI shows scan activity
+        self.state.scan_packet_count = int(sent_count)
+        self.state.scan_point_count = int(last_pts)
+        print(f"[visualizer] diag ready={scan_ready} call={call_count} sent={sent_count} pts={last_pts}")
         return True
 
 
@@ -363,8 +380,13 @@ class SerialWorker(threading.Thread):
                     if not chunk:
                         continue
                     for packet in parser.feed(chunk):
-                        if recon.apply(packet):
-                            self._push_latest(recon.state)
+                            # Lightweight packet-level logging for debugging
+                            try:
+                                print(f"[telemetry] pkt_type=0x{packet.packet_type:02X} seq={packet.seq} len={len(packet.payload)}")
+                            except Exception:
+                                pass
+                            if recon.apply(packet):
+                                self._push_latest(recon.state)
 
             except (serial.SerialException, OSError) as e:
                 print(f"[serial] disconnected/error: {e}")
@@ -394,6 +416,9 @@ class SerialWorker(threading.Thread):
             uptime_ms=state.uptime_ms,
             tx_queue_depth=state.tx_queue_depth,
             dropped_frames=state.dropped_frames,
+            lidar_points=None if state.lidar_points is None else state.lidar_points.copy(),
+            scan_packet_count=getattr(state, 'scan_packet_count', 0),
+            scan_point_count=getattr(state, 'scan_point_count', 0),
         )
 
         try:
@@ -410,7 +435,7 @@ class SerialWorker(threading.Thread):
 
 
 class LiveVisualizer:
-    def __init__(self, fps: float = 20.0) -> None:
+    def __init__(self, fps: float = 20.0, log_path: Optional[str] = None) -> None:
         self.fps = max(1.0, fps)
         self.state: Optional[TelemetryState] = None
 
@@ -430,6 +455,14 @@ class LiveVisualizer:
         self.robot_dot, = self.ax.plot([], [], marker="o", color="cyan", markersize=6)
         self.heading_line, = self.ax.plot([], [], color="cyan", linewidth=2)
         self.path_line, = self.ax.plot([], [], color="magenta", linewidth=2)
+        self.trail_line, = self.ax.plot([], [], color="yellow", linewidth=1)
+        self.scan_scatter = self.ax.scatter([], [], s=6, c="yellow", alpha=0.8)
+        # Confidence indicator (circle patch)
+        self.conf_patch = patches.Circle((0.95, 0.05), 0.03, transform=self.ax.transAxes, facecolor="green", edgecolor="black", zorder=10)
+        self.ax.add_patch(self.conf_patch)
+        # Arena boundary (Rectangle patch) — updated when grid meta arrives
+        self.arena_rect = patches.Rectangle((0, 0), DEFAULT_ARENA_W_M, DEFAULT_ARENA_H_M, fill=False, edgecolor="white", linewidth=2)
+        self.ax.add_patch(self.arena_rect)
         self.info_text = self.ax.text(
             0.02,
             0.98,
@@ -445,13 +478,36 @@ class LiveVisualizer:
         self.ax.set_aspect("equal", adjustable="box")
         self.ax.grid(True, alpha=0.2)
 
+        # Maintain a short trail of past poses
+        self._trail = []
+        self._trail_max = 200
+        # Diagnostic buffers for temporary jitter analysis
+        # Keep recent scan centroids and pose history to compute variation.
+        self._scan_centroids = deque(maxlen=50)
+        self._pose_history = deque(maxlen=50)
+        # Keep last full scan (angles,dists) for pairwise comparison
+        self._last_scan = None  # tuple(np.ndarray angles, np.ndarray dists)
+        # CSV logging
+        self._log_fh = None
+        if log_path:
+            try:
+                self._log_fh = open(log_path, "w", buffering=1)
+                # header
+                self._log_fh.write("timestamp,seq,scan_pts,scan_jitter_cm,scan_dd_mm,scan_da_deg,scan_max_dd_mm,scan_large_dd_count,scan_ang_span_deg,scan_ang_std_deg,pose_theta_std_deg\n")
+            except Exception as e:
+                print(f"[visualizer] failed to open log file {log_path}: {e}")
+
     @staticmethod
     def grid_to_rgb(occupancy: np.ndarray, terrain: np.ndarray) -> np.ndarray:
+        # occupancy and terrain are (grid_h, grid_w) with (0,0)=bottom-left.
+        # imshow uses origin='lower' so no rotation is required here.
+        
         h, w = occupancy.shape
         rgb = np.zeros((h, w, 3), dtype=np.uint8)
-        rgb[occupancy == 0] = (90, 90, 90)
-        rgb[occupancy == 1] = (220, 220, 220)
-        rgb[occupancy == 2] = (140, 25, 25)
+        # 0=unknown (gray), 1=free space (white), 2=occupied (dark red/black)
+        rgb[occupancy == 0] = (90, 90, 90)      # Unknown: gray
+        rgb[occupancy == 1] = (220, 220, 220)   # Free: white
+        rgb[occupancy == 2] = (20, 20, 20)      # Occupied: black
 
         ramp_mask = terrain == 1
         bump_mask = terrain == 2
@@ -488,6 +544,112 @@ class LiveVisualizer:
             self.path_line.set_data([], [])
 
         theta_deg = np.degrees(state.pose_theta_rad)
+
+        # Compute simple jitter diagnostics from recent scans / poses
+        scan_jitter_cm = 0.0
+        pose_theta_std_deg = 0.0
+        scan_mean_dd_mm = 0.0
+        scan_mean_da_deg = 0.0
+        scan_ang_span_deg = 0.0
+        scan_ang_std_deg = 0.0
+        if state.lidar_points is not None and state.lidar_points.size > 0:
+            # (angles,distances -> xy around robot) -- TEMPORARY LOCAL-FRAME PLOT
+            angles = state.lidar_points[:, 0]
+            dists = state.lidar_points[:, 1]
+            # Original (world) transform kept commented for easy restore:
+            # xs = state.pose_x_m + dists * np.cos(angles + state.pose_theta_rad)
+            # ys = state.pose_y_m + dists * np.sin(angles + state.pose_theta_rad)
+
+            # TEMP: plot in robot-local coordinates (no pose applied)
+            xs = dists * np.cos(angles)
+            ys = dists * np.sin(angles)
+            self.scan_scatter.set_offsets(np.vstack((xs, ys)).T)
+
+            # Compute centroid of current scan in local frame and record
+            try:
+                cx = float(np.mean(xs))
+                cy = float(np.mean(ys))
+                self._scan_centroids.append((cx, cy))
+            except Exception:
+                pass
+
+            if len(self._scan_centroids) > 1:
+                arr = np.array(self._scan_centroids)
+                std_x = float(np.std(arr[:, 0]))
+                std_y = float(np.std(arr[:, 1]))
+                scan_jitter_cm = (np.sqrt(std_x * std_x + std_y * std_y) * 100.0)
+            # Compare to previous scan if available: per-angle nearest-match distance diffs
+            try:
+                if self._last_scan is not None:
+                    prev_angles, prev_dists = self._last_scan
+                    # helper for wrapped angle diff
+                    def wrap_diff(a, b):
+                        d = a - b
+                        d = (d + np.pi) % (2 * np.pi) - np.pi
+                        return d
+
+                    # For each current angle, find index of nearest prev angle
+                    # Convert to radians
+                    cur_ang = np.asarray(angles)
+                    cur_dist = np.asarray(dists)
+                    prev_ang = np.asarray(prev_angles)
+                    prev_dist = np.asarray(prev_dists)
+
+                    # Ensure prev_ang sorted for efficient search by angle
+                    order = np.argsort(prev_ang)
+                    prev_ang_s = prev_ang[order]
+                    prev_dist_s = prev_dist[order]
+
+                    # use searchsorted on circular domain by duplicating array with +/-2pi
+                    pa = np.concatenate([prev_ang_s - 2 * np.pi, prev_ang_s, prev_ang_s + 2 * np.pi])
+                    pd = np.concatenate([prev_dist_s, prev_dist_s, prev_dist_s])
+
+                    idxs = np.searchsorted(pa, cur_ang)
+                    # clamp indices
+                    idxs = np.clip(idxs, 0, pa.size - 1)
+                    nearest_idx = idxs
+                    ang_diffs = np.abs(wrap_diff(cur_ang, pa[nearest_idx]))
+                    dist_diffs = np.abs(cur_dist - pd[nearest_idx])
+                    if dist_diffs.size > 0:
+                        scan_mean_dd_mm = float(np.mean(dist_diffs))
+                        scan_mean_da_deg = float(np.degrees(np.mean(ang_diffs)))
+                        scan_max_dd_mm = float(np.max(dist_diffs))
+                        scan_large_dd_count = int(np.sum(dist_diffs > 0.05))
+                    else:
+                        scan_max_dd_mm = 0.0
+                        scan_large_dd_count = 0
+            except Exception:
+                pass
+
+            # compute angular span/std (degrees) for diagnostics
+            try:
+                angs = np.asarray(angles)
+                # normalize to [-pi,pi] for std
+                angs_wrap = (angs + np.pi) % (2 * np.pi) - np.pi
+                scan_ang_span_deg = float((np.max(angs_wrap) - np.min(angs_wrap)) * 180.0 / np.pi)
+                scan_ang_std_deg = float(np.degrees(np.std(angs_wrap)))
+            except Exception:
+                scan_ang_span_deg = 0.0
+                scan_ang_std_deg = 0.0
+
+            # Save current scan for next comparison
+            try:
+                self._last_scan = (angles.copy(), dists.copy())
+            except Exception:
+                self._last_scan = None
+        else:
+            self.scan_scatter.set_offsets(np.empty((0, 2)))
+
+        # Record recent pose theta and compute angular std (deg)
+        try:
+            self._pose_history.append((state.pose_x_m, state.pose_y_m, state.pose_theta_rad))
+            if len(self._pose_history) > 1:
+                ph = np.array(self._pose_history)
+                theta_std = float(np.std(ph[:, 2]))
+                pose_theta_std_deg = np.degrees(theta_std)
+        except Exception:
+            pass
+
         self.info_text.set_text(
             f"seq: {state.seq}\n"
             f"x: {state.pose_x_m:.3f} m\n"
@@ -495,8 +657,58 @@ class LiveVisualizer:
             f"theta: {state.pose_theta_rad:.3f} rad ({theta_deg:.1f} deg)\n"
             f"uptime: {state.uptime_ms} ms\n"
             f"tx_queue: {state.tx_queue_depth}\n"
-            f"drops: {state.dropped_frames}"
+            f"drops: {state.dropped_frames}\n"
+            f"SCAN PKTS: {state.scan_packet_count}\n"
+            f"SCAN PTS: {state.scan_point_count}\n"
+            f"scan_jitter: {scan_jitter_cm:.2f} cm\n"
+            f"pose_theta_std: {pose_theta_std_deg:.3f} deg\n"
+            f"scan_dd: {scan_mean_dd_mm:.2f} mm\n"
+            f"scan_da: {scan_mean_da_deg:.3f} deg"
         )
+
+        # Write CSV log if enabled
+        if self._log_fh is not None:
+            try:
+                ts = time.time()
+                self._log_fh.write(f"{ts:.6f},{state.seq},{state.scan_point_count},{scan_jitter_cm:.3f},{scan_mean_dd_mm:.3f},{scan_mean_da_deg:.3f},{scan_max_dd_mm:.3f},{scan_large_dd_count},{scan_ang_span_deg:.3f},{scan_ang_std_deg:.6f},{pose_theta_std_deg:.6f}\n")
+            except Exception:
+                pass
+
+        # Update trail
+        self._trail.append((state.pose_x_m, state.pose_y_m))
+        if len(self._trail) > self._trail_max:
+            self._trail.pop(0)
+        tx = [p[0] for p in self._trail]
+        ty = [p[1] for p in self._trail]
+        self.trail_line.set_data(tx, ty)
+
+        # Update scan scatter if present (angles,distances -> xy around robot)
+        if state.lidar_points is not None and state.lidar_points.size > 0:
+            angles = state.lidar_points[:, 0]
+            dists = state.lidar_points[:, 1]
+            xs = state.pose_x_m + dists * np.cos(angles + state.pose_theta_rad)
+            ys = state.pose_y_m + dists * np.sin(angles + state.pose_theta_rad)
+            self.scan_scatter.set_offsets(np.vstack((xs, ys)).T)
+        else:
+            self.scan_scatter.set_offsets(np.empty((0, 2)))
+
+        # Confidence indicator: simple heuristic (lower is better)
+        conf = 1.0 - min(1.0, (state.dropped_frames / 200.0) + (state.tx_queue_depth / 200.0))
+        # map to color
+        if conf > 0.66:
+            col = "green"
+        elif conf > 0.33:
+            col = "orange"
+        else:
+            col = "red"
+        self.conf_patch.set_facecolor(col)
+
+        # Update arena rectangle to match grid extents
+        cell_m = state.cell_mm / 1000.0
+        width_m = state.grid_w * cell_m
+        height_m = state.grid_h * cell_m
+        self.arena_rect.set_width(width_m)
+        self.arena_rect.set_height(height_m)
 
     def animate(self, q: Queue) -> FuncAnimation:
         interval_ms = int(1000.0 / self.fps)
@@ -510,7 +722,7 @@ class LiveVisualizer:
                     break
             if latest is not None:
                 self.update_state(latest)
-            return self.img, self.robot_dot, self.heading_line, self.path_line, self.info_text
+            return self.img, self.robot_dot, self.heading_line, self.path_line, self.info_text, self.trail_line, self.scan_scatter
 
         return FuncAnimation(self.fig, tick, interval=interval_ms, blit=False)
 
@@ -531,6 +743,7 @@ def main() -> None:
     ap.add_argument("--port", type=str, default=None, help="Serial port, e.g. COM3")
     ap.add_argument("--baud", type=int, default=115200, help="Baud rate")
     ap.add_argument("--fps", type=float, default=20.0, help="Display refresh rate")
+    ap.add_argument("--log", type=str, default=None, help="Optional CSV log path for diagnostics")
     args = ap.parse_args()
 
     port = args.port or pick_default_port()
@@ -541,7 +754,7 @@ def main() -> None:
     worker = SerialWorker(port=port, baud=args.baud, out_q=q)
     worker.start()
 
-    viz = LiveVisualizer(fps=args.fps)
+    viz = LiveVisualizer(fps=args.fps, log_path=args.log)
     _ani = viz.animate(q)
 
     try:

@@ -313,7 +313,9 @@ void MappingNav::markRay(float start_x, float start_y,
 }
 
 void MappingNav::maybeMarkFree(uint16_t idx) {
-  // Do not erase occupied cells with a single free observation.
+  // Mark cell as FREE only if it was previously UNKNOWN.
+  // Do not overwrite OCCUPIED cells — an occupied cell should only be
+  // cleared by an explicit valid observation path elsewhere in the code.
   if (getOccupancy(idx) == OCC_UNKNOWN) {
     setOccupancy(idx, OCC_FREE);
   }

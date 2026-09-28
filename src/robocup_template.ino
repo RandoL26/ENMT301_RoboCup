@@ -43,6 +43,16 @@
 #include "ch9143_bluetooth.h"       //CH9143 Bluetooth module
 #include "optical_flow.h"           // PMW3901 optical flow (Bitcraze)
 #include "ld06.h"                   // LD06 LiDAR
+#include "BigServo.h"               // Big servo
+#include "RoboSLAM.h"
+#include "telemetry.h"
+
+// Gate legacy ASCII Teleplot / diagnostic prints so they don't corrupt
+// the framed binary telemetry stream. Set to 1 to allow ASCII debug.
+#ifndef TELEMETRY_ALLOW_ASCII_TELEPLOT
+#define TELEMETRY_ALLOW_ASCII_TELEPLOT 0
+#endif
+
 
 //**********************************************************************************
 // Local Definitions
@@ -68,6 +78,8 @@
 #define VL53L1X_SENSOR_READ_PERIOD          100
 #define IR_DISTANCE_SENSOR_READ_PERIOD      50
 #define DC_MOTOR_CONTROL_PERIOD             40
+#define BIG_SERVO_PERIOD                    1000
+
 
 #define OF_READ_TASK_PERIOD                 40
 #define OF_READ_TASK_NUM_EXECUTE            -1
@@ -100,6 +112,7 @@
 #define VL53L1X_SENSOR_NUM_EXECUTE          -1
 #define IR_DISTANCE_SENSOR_NUM_EXECUTE      -1
 #define DC_MOTOR_CONTROL_NUM_EXECUTE        -1
+#define BIG_SERVO_NUM_EXECUTE               -1
 
 // Pin deffinitions
 #define IO_POWER  49
@@ -153,6 +166,8 @@ struct bno055_t bno055;
 
 // Global IMU data storage (for inter-task communication)
 IMU_Data current_imu_data;
+// Initial heading offset (set at IMU init to make headings relative to startup)
+float imu_heading_offset = 0.0f;
 
 // Proximity Sensor instance
 ProximitySensor proximitySensor(PROXIMITY_SENSOR_PIN);
@@ -162,6 +177,10 @@ OpticalFlow opticalFlow(10);
 
 // LD06 LiDAR on Serial2 (UART @ 230400 configured in ld06.init())
 LD06 ld06(Serial2);
+
+// Mapping and on-board SLAM
+MappingNav mappingNav;
+RoboSLAM roboSlam(mappingNav, driveMotor, opticalFlow);
 
 // Ultrasonic Sensor instance (kept for backwards compatibility)
 // UltrasonicSensor ultrasonicSensor(ULTRASONIC_TRIGGER_PIN_1, ULTRASONIC_ECHO_PIN_1);
@@ -209,6 +228,11 @@ int16_t slew_toward(int16_t current, int16_t target, int16_t step);
 void proximity_sensor_callback(void) {
     proximitySensor.update();
     proximitySensor.printStatus();
+    if (!(proximitySensor.isObjectDetected())){
+        collect_weight();
+    } else {
+        digitalWrite(ELECTROMAGNET_PIN, HIGH);
+    }
 }
 
 // Task wrapper for ultrasonic sensor reading (array with 2 sensors)
@@ -259,25 +283,28 @@ void optical_flow_callback(void) {
 
 // Task wrapper for LD06 LiDAR reading
 void ld06_lidar_callback(void) {
-    int uart2AvailBefore = Serial2.available();
-
-    // Same usage as Basic.ino: when a full scan is ready, stream Teleplot format.
+    // Read lidar and, when a full scan is ready, emit Teleplot-format points
     bool scanReady = ld06.readScan();
     if (scanReady) {
-        ld06.printScanTeleplot(Serial);
+        // increment diagnostic: readScan() returned true
+        scan_ready_count++;
     }
+    if (scanReady) {
+        // Feed on-board RoboSLAM then also emit Teleplot for external tools if needed
+        roboSlam.processScan(ld06, current_imu_data);
+        // Diagnostic print: number of points available for telemetry
 
-    // Lightweight diagnostics once per second (helps verify UART traffic/CRC/scan state)
-    static uint32_t lastDiagMs = 0;
-    uint32_t now = millis();
-    if (now - lastDiagMs >= 1000) {
-        lastDiagMs = now;
-        static uint16_t prevCrcFail = 0;
-        uint16_t crcFail = ld06.getChecksumFailCount();
-        uint16_t crcDelta = crcFail - prevCrcFail;
-        prevCrcFail = crcFail;
-
-        
+        // Emit a downsampled scan for the visualizer (non-blocking, small)
+        // increment diagnostic: about to call telemetry send
+        scan_telemetry_call_count++;
+        last_scan_point_count = ld06.getNbPointsInScan();
+        telemetry_send_downsampled_scan(ld06, mappingNav, 48);
+#if TELEMETRY_ALLOW_ASCII_TELEPLOT
+        Serial.print("TELEM SCAN POINTS=");
+        Serial.println(ld06.getNbPointsInScan());
+        // Keep Teleplot for backwards compatibility
+        ld06.printScanTeleplot(Serial);
+#endif
     }
 }
 
@@ -367,14 +394,43 @@ void ir_distance_sensor_callback(void) {
 // Task wrapper for IMU reading
 void imu_task_callback(void) {
     current_imu_data = read_imu();
-    // Print IMU data to both Serial and Bluetooth
-    printfBoth("Raw Gyro X:%d Y:%d Z:%d | Accel: %d, %d, %d\n",
-               current_imu_data.gyro_x,
-               current_imu_data.gyro_y,
-               current_imu_data.gyro_z,
-               current_imu_data.accel_x,
-               current_imu_data.accel_y,
-               current_imu_data.accel_z);
+    // Print tidy IMU headings (relative to startup) and accelerations
+    float heading_rel = current_imu_data.euler_h - imu_heading_offset;
+    // Normalize heading to [-180,180]
+    while (heading_rel > 180.0f) heading_rel -= 360.0f;
+    while (heading_rel <= -180.0f) heading_rel += 360.0f;
+    // Compute accel-derived roll/pitch for sanity check
+    float ax = current_imu_data.accel_x;
+    float ay = current_imu_data.accel_y;
+    float az = current_imu_data.accel_z;
+    // Prevent division by zero
+    float denom = sqrtf(ay*ay + az*az);
+    float pitch_acc = 0.0f;
+    if (denom > 1e-6f) pitch_acc = atan2f(-ax, denom) * 180.0f / PI;
+    float roll_acc = 0.0f;
+    if (fabsf(az) > 1e-6f) roll_acc = atan2f(ay, az) * 180.0f / PI;
+        // Choose roll/pitch source: use accel-derived values when stationary (|g|-9.81 small)
+        float g = sqrtf(ax*ax + ay*ay + az*az);
+        const float G = 9.80665f;
+        const float G_THRESH = 0.5f; // m/s^2
+        float roll_out, pitch_out;
+        const char *src = "BNO";
+        if (fabsf(g - G) <= G_THRESH) {
+            // stationary: accelerometer gives reliable roll/pitch
+            roll_out = roll_acc;
+            pitch_out = pitch_acc;
+            src = "ACC";
+        } else {
+            roll_out = current_imu_data.euler_r;
+            pitch_out = current_imu_data.euler_p;
+        }
+        // Single-line output: Heading | roll/pitch(source) | accel XYZ
+        // printfBoth("Heading: %.2f\xC2\xB0 | R: %.2f\xC2\xB0 P: %.2f\xC2\xB0 (%s) | Accel(m/s^2): %.2f, %.2f, %.2f\n",
+        //                      heading_rel,
+        //                      roll_out,
+        //                      pitch_out,
+        //                      src,
+        //                      ax, ay, az);
 }
 
 // Task wrapper for DC motor control
@@ -647,7 +703,20 @@ void herkulex_test_callback() {
     //printfBoth("Herkulex test move to %d\n", Herkulex.getPosition(HERKULEX_ID));
     toggle = !toggle;
 }
-
+int angle = 0;
+void big_servo_callback() {
+    
+    if (angle<50){
+        angle += 10;
+        bigServo_move(90);
+    } else if (angle<100) {
+        bigServo_move(180);
+        angle += 10;
+    } else {
+        angle = 0;
+    }
+    
+}
 //**********************************************************************************
 // Task Scheduler and Tasks
 //**********************************************************************************
@@ -691,6 +760,7 @@ Task tUnload_weights(UNLOAD_WEIGHTS_TASK_PERIOD, UNLOAD_WEIGHTS_TASK_NUM_EXECUTE
 // Tasks to check the 'watchdog' timer (These will need to be added in)
 //Task tCheck_watchdog(CHECK_WATCHDOG_TASK_PERIOD, CHECK_WATCHDOG_TASK_NUM_EXECUTE, &check_watchdog);
 //Task tVictory_dance(VICTORY_DANCE_TASK_PERIOD,   VICTORY_DANCE_TASK_NUM_EXECUTE,  &victory_dance);
+Task tBig_Servo(BIG_SERVO_PERIOD, BIG_SERVO_NUM_EXECUTE, &big_servo_callback);
 
 Scheduler taskManager;
 
@@ -754,7 +824,7 @@ void setup() {
   pin_init();
   robot_init();        // robot_init() calls BNO_Init() which needs I2C
   task_init();
-  
+  bigServo_setup();
   // Now that Bluetooth is initialized, send startup message
   if (bluetooth.isInitialized()) {
     bluetooth.println("Setup Complete");
@@ -847,8 +917,11 @@ void robot_init() {
 
     printlnBoth("Initialising LD06 LiDAR on Serial2...");
     ld06.init();
+    // Re-enable CRC for normal operation; enable full-scan so
+    // `readScan()` reports when a full 360° scan completes.
+    ld06.enableCRC();
     ld06.enableFullScan();
-    printlnBoth("LD06 LiDAR initialized");
+    printlnBoth("LD06 LiDAR initialized (CRC enabled, full-scan enabled)");
 
     printlnBoth("Initialising IR Distance Sensor (2Y0A02)...");
     irDistanceSensor.begin();
@@ -926,9 +999,24 @@ void robot_init() {
         
         // Calibrate gyroscope to zero on startup
         calibrate_gyroscope();
+        // Read IMU once to capture initial fused heading as offset
+        delay(100);
+        IMU_Data init_imu = read_imu();
+        imu_heading_offset = init_imu.euler_h;
+        // Print calibration status (0..3 for each: sys, gyro, accel, mag)
+        unsigned char sys_cal=0, gyr_cal=0, acc_cal=0, mag_cal=0;
+        bno055_get_syscalib_status(&sys_cal);
+        bno055_get_gyrocalib_status(&gyr_cal);
+        bno055_get_accelcalib_status(&acc_cal);
+        bno055_get_magcalib_status(&mag_cal);
+        printfBoth("BNO055 calib status - SYS:%u GYR:%u ACC:%u MAG:%u\n", sys_cal, gyr_cal, acc_cal, mag_cal);
         
         printlnBoth("Initialising DC Motor...");
         driveMotor.begin();
+        // Initialize RoboSLAM baseline (read initial encoder/flow/imu state)
+        roboSlam.begin();
+        // Initialize telemetry over USB Serial
+        telemetry_init(Serial);
         
         printlnBoth("Robot is ready \n");
     } else {
@@ -948,8 +1036,8 @@ void task_init() {
   // taskManager.addTask(tRead_ultrasonic);   //reading ultrasonic 
   // taskManager.addTask(tRead_infrared);
   // taskManager.addTask(tRead_colour);
-//   taskManager.addTask(tRead_imu);          //reading IMU
-//   taskManager.addTask(tProximity_sensor);  //reading proximity sensor
+  taskManager.addTask(tRead_imu);          //reading IMU
+    // taskManager.addTask(tProximity_sensor);  //reading proximity sensor
     // taskManager.addTask(tUltrasonic_sensor);  //reading ultrasonic sensor
     // taskManager.addTask(tColor_sensor);       //reading color sensor
     // taskManager.addTask(tIR_XY_Position);     //reading IR XY position sensor
@@ -972,7 +1060,7 @@ void task_init() {
     // taskManager.addTask(tBT_stream_test);  // Disabled for control reliability
     // taskManager.addTask(tOpticalFlow);        //reading optical flow sensor
     taskManager.addTask(tLD06_lidar);          //reading LD06 lidar
-
+    taskManager.addTask(tBig_Servo);
     //enable the tasks
   tRead_ultrasonic.enable();
   tRead_infrared.enable();
@@ -986,13 +1074,14 @@ void task_init() {
   tIR_Distance_sensor.enable();
   tTOF_X8.enable();
   tSensor_average.enable();
-  tDC_motor.enable();
-  tSet_motor.enable();
+  //tDC_motor.enable();
+  //tSet_motor.enable();
   tWeight_scan.enable();
   tCollect_weight.enable();
   tReturn_to_base.enable();
   tDetect_base.enable();
   tUnload_weights.enable();
+  //tBig_Servo.enable();
  //tCheck_watchdog.enable();
  //tVictory_dance.enable();
    tHerkulexTest.enable();
@@ -1015,8 +1104,34 @@ void loop() {
     process_bluetooth_motor_commands();
     // Also accept commands from USB serial monitor (direct wired testing)
     process_usb_motor_commands();
-  
+
     taskManager.execute();    //execute the scheduler
-    //Serial.println("Another scheduler execution cycle has oocured \n");
+    // Periodic telemetry: heartbeat(1s), pose/path(200ms), grid keyframe(1500ms)
+    static unsigned long last_hb_ms = 0;
+    static unsigned long last_pose_ms = 0;
+    static unsigned long last_grid_ms = 0;
+    unsigned long now = millis();
+    if (now - last_hb_ms >= 1000) {
+        telemetry_send_heartbeat(now, 0, 0);
+        // Send temporary diagnostic packet with scan counters (avoid ASCII on binary stream)
+        telemetry_send_diag_scan();
+        // Also optionally print ASCII diagnostics to Serial when allowed (may corrupt binary stream)
+#if TELEMETRY_ALLOW_ASCII_TELEPLOT
+        Serial.printf("DIAG SCAN ready=%lu call=%lu sent=%lu pts=%u\n",
+                      (unsigned long)scan_ready_count,
+                      (unsigned long)scan_telemetry_call_count,
+                      (unsigned long)scan_telemetry_sent_count,
+                      (unsigned int)last_scan_point_count);
+#endif
+        last_hb_ms = now;
+    }
+    if (now - last_pose_ms >= 200) {
+        telemetry_send_pose_and_path(mappingNav);
+        last_pose_ms = now;
+    }
+    if (now - last_grid_ms >= 1500) {
+        telemetry_send_grid_keyframe(mappingNav);
+        last_grid_ms = now;
+    }
 }
 

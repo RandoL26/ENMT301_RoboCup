@@ -232,6 +232,7 @@
                 "PLATFORMIO=60200",
                 "__IMXRT1062__",
                 "ARDUINO_TEENSY40",
+                "TELEMETRY_ALLOW_ASCII_TELEPLOT=1",
                 "USB_SERIAL",
                 "ARDUINO=10805",
                 "TEENSYDUINO=160",

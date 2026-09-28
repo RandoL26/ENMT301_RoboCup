@@ -20,8 +20,9 @@
 //states for swapping between searching and collecting
 #define NO_WEIGHT               0   
 #define WEIGHT_FOUND            1
-
-
+#define ELECTROMAGNET_PIN       26
+#define PICKUP_ANGLE            180
+#define DROPOFF_ANGLE           90
 
 void weight_scan(/* whatever parameters */);
 

@@ -117,6 +117,10 @@ public:
     return &_previousPacket;
   }
 
+  // Diagnostics exported for telemetry (examined per completed raw scan)
+  // Diagnostics exported for telemetry (examined per completed raw scan)
+  // (moved to file-scope externs after the class declaration)
+
   // Others
   inline bool isChecksumOk() __attribute__((always_inline));
   int16_t rescaleAngle(int16_t angle);
@@ -243,5 +247,19 @@ bool LD06::filter(const DataPoint &point) {
   }
   return distanceFilter && intensityFilter && angularFilter;
 }
+
+// Diagnostic globals (defined in src/ld06.cpp)
+extern uint16_t ld06_diag_num_points;
+extern uint16_t ld06_diag_first_angle_cdeg;
+extern uint16_t ld06_diag_last_angle_cdeg;
+extern uint16_t ld06_diag_min_angle_cdeg;
+extern uint16_t ld06_diag_max_angle_cdeg;
+extern uint16_t ld06_diag_neg_steps_count;
+extern uint16_t ld06_diag_large_pos_jumps_count;
+extern uint16_t ld06_diag_largest_pos_step_cdeg;
+extern uint16_t ld06_diag_largest_neg_step_cdeg;
+extern uint16_t ld06_diag_total_span_cdeg;
+extern uint8_t  ld06_diag_approx_one_revolution; // 0=false,1=true
+
 
 #endif
