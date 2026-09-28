@@ -5,6 +5,36 @@
 #include <stdint.h>
 #include "MappingNav.h"
 
+// Additional telemetry packets
+#define PACKET_STATUS          0x07
+#define PACKET_INFLATED_GRID   0x08
+
+// Start side
+enum TelemetryStartSide : uint8_t {
+    TELEMETRY_START_LEFT = 0,
+    TELEMETRY_START_RIGHT = 1
+};
+
+// Send robot/system status.
+void telemetry_send_status(
+    uint8_t start_side,
+    bool lidar_ok,
+    bool imu_ok,
+    bool tof_ok,
+    bool optical_flow_ok,
+    bool ultrasonic_ok,
+    int16_t motor_left,
+    int16_t motor_right,
+    float left_rpm,
+    float right_rpm,
+    bool planner_goal_set,
+    uint16_t goal_cell,
+    uint16_t path_length
+);
+
+// Send inflated obstacle grid.
+void telemetry_send_inflated_grid(const MappingNav &nav);
+
 class LD06; // forward
 
 // Initialize telemetry over a Serial-like Print/Stream. Pass Serial (USB) instance.
@@ -31,5 +61,7 @@ void telemetry_update_ld06_diagnostics(struct DataPointHandler *scan);
 
 // Send a diagnostic packet with the above counters (temporary)
 void telemetry_send_diag_scan();
+
+
 
 #endif // TELEMETRY_H_

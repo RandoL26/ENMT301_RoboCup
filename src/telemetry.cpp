@@ -444,3 +444,121 @@ void telemetry_update_ld06_diagnostics(struct DataPointHandler *scan) {
   g_ld_zero_count = zero_count; g_ld_invalid_count = invalid_count;
   g_ld_min_distance_mm = min_mm; g_ld_max_distance_mm = max_mm; g_ld_large_jump_count = large_jump_count;
 }
+
+void telemetry_send_status(
+    uint8_t start_side,
+    bool lidar_ok,
+    bool imu_ok,
+    bool tof_ok,
+    bool optical_flow_ok,
+    bool ultrasonic_ok,
+    int16_t motor_left,
+    int16_t motor_right,
+    float left_rpm,
+    float right_rpm,
+    bool planner_goal_set,
+    uint16_t goal_cell,
+    uint16_t path_length)
+{
+    /*
+     * STATUS packet 0x07
+     *
+     * Byte layout:
+     *
+     * 0       start side
+     * 1       sensor flags
+     * 2-3     left motor command
+     * 4-5     right motor command
+     * 6-9     measured left RPM
+     * 10-13   measured right RPM
+     * 14      planner goal set
+     * 15-16   goal cell
+     * 17-18   path length
+     *
+     * Total = 19 bytes
+     */
+
+    const uint16_t payload_len = 19;
+
+    uint8_t payload[payload_len];
+
+    // Start side
+    payload[0] = start_side;
+
+    // Sensor status bitfield
+    //
+    // bit 0 = LiDAR
+    // bit 1 = BNO055
+    // bit 2 = ToF
+    // bit 3 = Optical Flow
+    // bit 4 = Ultrasonic
+
+    uint8_t sensor_flags = 0;
+
+    if (lidar_ok)
+        sensor_flags |= (1 << 0);
+
+    if (imu_ok)
+        sensor_flags |= (1 << 1);
+
+    if (tof_ok)
+        sensor_flags |= (1 << 2);
+
+    if (optical_flow_ok)
+        sensor_flags |= (1 << 3);
+
+    if (ultrasonic_ok)
+        sensor_flags |= (1 << 4);
+
+    payload[1] = sensor_flags;
+
+    // Motor commands
+    memcpy(
+        &payload[2],
+        &motor_left,
+        sizeof(int16_t)
+    );
+
+    memcpy(
+        &payload[4],
+        &motor_right,
+        sizeof(int16_t)
+    );
+
+    // Motor RPM
+    memcpy(
+        &payload[6],
+        &left_rpm,
+        sizeof(float)
+    );
+
+    memcpy(
+        &payload[10],
+        &right_rpm,
+        sizeof(float)
+    );
+
+    // Planner
+    payload[14] =
+        planner_goal_set ? 1 : 0;
+
+    payload[15] =
+        (uint8_t)(goal_cell & 0xFF);
+
+    payload[16] =
+        (uint8_t)((goal_cell >> 8) & 0xFF);
+
+    payload[17] =
+        (uint8_t)(path_length & 0xFF);
+
+    payload[18] =
+        (uint8_t)((path_length >> 8) & 0xFF);
+
+    send_frame(
+        1,
+        PACKET_STATUS,
+        payload,
+        payload_len
+    );
+}
+

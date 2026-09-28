@@ -200,6 +200,22 @@ const uint8_t *MappingNav::getGridData() const {
   return m_grid;
 }
 
+const uint8_t *MappingNav::getInflatedGridData() const {
+    return m_inflated_blocked;
+}
+
+bool MappingNav::isGoalSet() const {
+    return m_goal_set;
+}
+
+uint16_t MappingNav::getGoalCellIndex() const {
+    return m_goal_idx;
+}
+
+uint16_t MappingNav::getPathLength() const {
+    return m_path_len;
+}
+
 float MappingNav::wrapAngle(float a) {
   while (a > 3.14159265359f) a -= 6.28318530718f;
   while (a < -3.14159265359f) a += 6.28318530718f;
