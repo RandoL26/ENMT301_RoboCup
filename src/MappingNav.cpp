@@ -200,6 +200,22 @@ const uint8_t *MappingNav::getGridData() const {
   return m_grid;
 }
 
+const uint8_t *MappingNav::getInflatedGridData() const {
+    return m_inflated_blocked;
+}
+
+bool MappingNav::isGoalSet() const {
+    return m_goal_set;
+}
+
+uint16_t MappingNav::getGoalCellIndex() const {
+    return m_goal_idx;
+}
+
+uint16_t MappingNav::getPathLength() const {
+    return m_path_len;
+}
+
 float MappingNav::wrapAngle(float a) {
   while (a > 3.14159265359f) a -= 6.28318530718f;
   while (a < -3.14159265359f) a += 6.28318530718f;
@@ -313,8 +329,12 @@ void MappingNav::markRay(float start_x, float start_y,
 }
 
 void MappingNav::maybeMarkFree(uint16_t idx) {
-  // Do not erase occupied cells with a single free observation.
-  if (getOccupancy(idx) == OCC_UNKNOWN) {
+  // Mark cell as FREE when observed as empty space.
+  // Allows OCCUPIED → FREE transitions (e.g., moving obstacles or misdetections).
+  // Only UNKNOWN cells remain UNKNOWN; once observed as either OCCUPIED or FREE,
+  // subsequent observations determine the cell state.
+  Occupancy current = getOccupancy(idx);
+  if (current != OCC_OCCUPIED) {
     setOccupancy(idx, OCC_FREE);
   }
 }

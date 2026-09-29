@@ -113,8 +113,21 @@ public:
   bool getNextWaypoint(float &x_m, float &y_m) const;
   uint16_t getPathCells(CellCoord *out_cells, uint16_t max_cells) const;
 
-  // Raw map access (1 byte per cell bit-packed as described above)
+  // Raw map access (1 byte per cell)
   const uint8_t *getGridData() const;
+
+  // Inflated obstacle map.
+  // 1 = blocked after robot-radius inflation
+  // 0 = traversable
+  const uint8_t *getInflatedGridData() const;
+
+  // Planner status
+  bool isGoalSet() const;
+  uint16_t getGoalCellIndex() const;
+  uint16_t getPathLength() const;
+  
+  // Cell occupancy query (needed for POI detection and search planning)
+  Occupancy getOccupancy(uint16_t idx) const;
 
 private:
   // Cell packing helpers
@@ -169,8 +182,7 @@ private:
   bool inBoundsCell(int32_t cx, int32_t cy) const;
   bool inBoundsWorld(float x_m, float y_m) const;
 
-  // Cell read/write helpers
-  Occupancy getOccupancy(uint16_t idx) const;
+  // Cell read/write helpers (occupancy moved to public section above)
   void setOccupancy(uint16_t idx, Occupancy occ);
   Terrain getTerrain(uint16_t idx) const;
   void setTerrain(uint16_t idx, Terrain terrain);

@@ -4,7 +4,7 @@
     "stm32-for-vscode.openOCDPath": false,
     "stm32-for-vscode.makePath": false,
     "stm32-for-vscode.armToolchainPath": false,
-    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "python-envs.defaultEnvManager": "ms-python.python:venv",
     "python.analysis.extraPaths": [
         "./tools/BreezySLAM/python"
     ]

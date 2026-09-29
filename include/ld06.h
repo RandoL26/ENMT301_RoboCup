@@ -117,6 +117,10 @@ public:
     return &_previousPacket;
   }
 
+  // Diagnostics exported for telemetry (examined per completed raw scan)
+  // Diagnostics exported for telemetry (examined per completed raw scan)
+  // (moved to file-scope externs after the class declaration)
+
   // Others
   inline bool isChecksumOk() __attribute__((always_inline));
   int16_t rescaleAngle(int16_t angle);
@@ -127,6 +131,7 @@ private:
   bool readDataNoCRC();
   void computeData();
   inline bool filter(const DataPoint &point) __attribute__((always_inline));
+  bool isScanValid(DataPointHandler* scan);  // FIX: Validate scan quality
   void swapBuffers();
 
   // Data
@@ -137,6 +142,8 @@ private:
   bool _currentBuffer = 0;  //
 
   bool _newScan = false;
+  uint16_t _completedScanPoints = 0;
+  bool _scanReadyLatched = false;
   uint16_t _checksumFailCount = 0;
 
   // Reading buffers
@@ -178,7 +185,7 @@ void LD06::setBasePosition(int16_t xPos = 0, int16_t yPos = 0, float anglePos = 
 // Inline getters
 
 uint16_t LD06::getNbPointsInScan() {
-  return _previousScan->index;
+  return _completedScanPoints;
 }
 
 uint16_t LD06::getSpeed() {
@@ -243,5 +250,19 @@ bool LD06::filter(const DataPoint &point) {
   }
   return distanceFilter && intensityFilter && angularFilter;
 }
+
+// Diagnostic globals (defined in src/ld06.cpp)
+extern uint16_t ld06_diag_num_points;
+extern uint16_t ld06_diag_first_angle_cdeg;
+extern uint16_t ld06_diag_last_angle_cdeg;
+extern uint16_t ld06_diag_min_angle_cdeg;
+extern uint16_t ld06_diag_max_angle_cdeg;
+extern uint16_t ld06_diag_neg_steps_count;
+extern uint16_t ld06_diag_large_pos_jumps_count;
+extern uint16_t ld06_diag_largest_pos_step_cdeg;
+extern uint16_t ld06_diag_largest_neg_step_cdeg;
+extern uint16_t ld06_diag_total_span_cdeg;
+extern uint8_t  ld06_diag_approx_one_revolution; // 0=false,1=true
+
 
 #endif
