@@ -150,7 +150,7 @@ enum RobotStartSide {
 };
 
 // Change this to START_LEFT or START_RIGHT
-RobotStartSide robotStartSide = START_LEFT;
+RobotStartSide robotStartSide = START_RIGHT;
 
 // IMPORTANT:
 // Replace these with the actual coordinates from your

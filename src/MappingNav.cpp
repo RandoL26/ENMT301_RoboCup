@@ -329,14 +329,18 @@ void MappingNav::markRay(float start_x, float start_y,
 }
 
 void MappingNav::maybeMarkFree(uint16_t idx) {
-  // Mark cell as FREE when observed as empty space.
-  // Allows OCCUPIED → FREE transitions (e.g., moving obstacles or misdetections).
-  // Only UNKNOWN cells remain UNKNOWN; once observed as either OCCUPIED or FREE,
-  // subsequent observations determine the cell state.
-  Occupancy current = getOccupancy(idx);
-  if (current != OCC_OCCUPIED) {
-    setOccupancy(idx, OCC_FREE);
-  }
+  // A LiDAR ray has passed through this cell without hitting an obstacle.
+  // Therefore the cell is observed to be free.
+  //
+  // This intentionally allows:
+  //
+  // UNKNOWN  -> FREE
+  // FREE     -> FREE
+  // OCCUPIED -> FREE
+  //
+  // The latter is important for moving obstacles and false LiDAR detections.
+
+  setOccupancy(idx, OCC_FREE);
 }
 
 bool MappingNav::expectedBoundaryDistance(float ray_angle_global, float &out_dist_m) const {
