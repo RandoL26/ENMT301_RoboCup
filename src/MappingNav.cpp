@@ -99,43 +99,82 @@ void MappingNav::updateGridFromSensors(const SensorRay *rays, uint16_t ray_count
   }
 }
 
-void MappingNav::applyBoundaryCorrection(const SensorRay *rays,
-                                         uint16_t ray_count,
-                                         float correction_gain,
-                                         float match_tolerance_m) {
-  if (!rays) return;
-  if (correction_gain < 0.0f) correction_gain = 0.0f;
-  if (correction_gain > 1.0f) correction_gain = 1.0f;
+void MappingNav::applyBoundaryCorrection(
+    const SensorRay *rays,
+    uint16_t ray_count,
+    float correction_gain,
+    float match_tolerance_m,
+    float lidar_offset_x_m,
+    float lidar_offset_y_m)
+{
+    if (!rays || ray_count == 0) {
+        return;
+    }
 
-  float corr_x = 0.0f;
-  float corr_y = 0.0f;
-  uint16_t used = 0;
+    const float c = cosf(m_pose.theta_rad);
+    const float s = sinf(m_pose.theta_rad);
 
-  for (uint16_t i = 0; i < ray_count; ++i) {
-    const SensorRay &r = rays[i];
-    if (!r.valid || !r.has_hit) continue;
+    // Calculate the LiDAR position in world coordinates.
+    const float lidar_x =
+        m_pose.x_m +
+        lidar_offset_x_m * c -
+        lidar_offset_y_m * s;
 
-    float expected_d = 0.0f;
-    const float global_ang = wrapAngle(m_pose.theta_rad + r.angle_offset_rad);
-    if (!expectedBoundaryDistance(global_ang, expected_d)) continue;
+    const float lidar_y =
+        m_pose.y_m +
+        lidar_offset_x_m * s +
+        lidar_offset_y_m * c;
 
-    const float err = r.distance_m - expected_d;
-    if (absf(err) > match_tolerance_m) continue;
+    float correction_x = 0.0f;
+    float correction_y = 0.0f;
+    uint16_t matches = 0;
 
-    // Move pose opposite the range error along the beam axis.
-    // If measured is too long, pull robot forward along beam; if too short, push back.
-    corr_x += -err * cosf(global_ang);
-    corr_y += -err * sinf(global_ang);
-    ++used;
-  }
+    for (uint16_t i = 0; i < ray_count; ++i) {
+        const SensorRay &ray = rays[i];
 
-  if (used > 0) {
-    const float scale = correction_gain / (float)used;
-    m_pose.x_m += corr_x * scale;
-    m_pose.y_m += corr_y * scale;
-    m_pose.x_m = minf(maxf(m_pose.x_m, 0.0f), ARENA_WIDTH_M);
-    m_pose.y_m = minf(maxf(m_pose.y_m, 0.0f), ARENA_HEIGHT_M);
-  }
+        if (!ray.valid || !ray.has_hit) {
+            continue;
+        }
+
+        const float global_ang =
+            m_pose.theta_rad + ray.angle_offset_rad;
+
+        float expected_d = 0.0f;
+
+        if (!expectedBoundaryDistance(
+                lidar_x,
+                lidar_y,
+                global_ang,
+                expected_d)) {
+            continue;
+        }
+
+        const float measured_d = ray.distance_m;
+        const float error = expected_d - measured_d;
+
+        if (fabsf(error) > match_tolerance_m) {
+            continue;
+        }
+
+        // Convert the radial error into a world-frame correction.
+        correction_x += error * cosf(global_ang);
+        correction_y += error * sinf(global_ang);
+
+        ++matches;
+    }
+
+    if (matches == 0) {
+        return;
+    }
+
+    correction_x /= (float)matches;
+    correction_y /= (float)matches;
+
+    m_pose.x_m += correction_gain * correction_x;
+    m_pose.y_m += correction_gain * correction_y;
+
+    // Keep pose inside the arena.
+    setPose(m_pose.x_m, m_pose.y_m, m_pose.theta_rad);
 }
 
 bool MappingNav::setTerrainAtCell(uint16_t cell_x, uint16_t cell_y, Terrain terrain) {
@@ -146,12 +185,20 @@ bool MappingNav::setTerrainAtCell(uint16_t cell_x, uint16_t cell_y, Terrain terr
 }
 
 bool MappingNav::setGoalCell(uint16_t goal_x, uint16_t goal_y) {
-  if (goal_x >= GRID_WIDTH || goal_y >= GRID_HEIGHT) return false;
+  if (goal_x >= GRID_WIDTH || goal_y >= GRID_HEIGHT) {
+    return false;
+  }
 
+  // Reset planner state first.
+  plannerResetAll();
+
+  // Now set the new goal.
   m_goal_idx = indexOf(goal_x, goal_y);
   m_goal_set = true;
-  plannerResetAll();
+
+  // Initialise D* Lite around the new goal.
   plannerInitializeIfNeeded();
+
   return true;
 }
 
@@ -457,45 +504,110 @@ void MappingNav::updateOccupancyEvidence(uint16_t idx, int8_t delta) {
   }
 }
 
-bool MappingNav::expectedBoundaryDistance(float ray_angle_global, float &out_dist_m) const {
-  // Intersect ray p + t*d (t>=0) with arena rectangle boundaries.
-  const float px = m_pose.x_m;
-  const float py = m_pose.y_m;
+bool MappingNav::expectedBoundaryDistance(
+    float ray_origin_x,
+    float ray_origin_y,
+    float ray_angle_global,
+    float &out_dist_m) const {
+
+  // Ray:
+  //
+  // p + t*d
+  //
+  // where p is the LiDAR position and d is the
+  // LiDAR beam direction.
+
+  const float px = ray_origin_x;
+  const float py = ray_origin_y;
+
   const float dx = cosf(ray_angle_global);
   const float dy = sinf(ray_angle_global);
 
   float best = INF;
 
+  // ----------------------------------------------------------
   // x = 0
+  // ----------------------------------------------------------
+
   if (absf(dx) > 1.0e-6f) {
-    float t = (0.0f - px) / dx;
+
+    float t =
+        (0.0f - px) / dx;
+
     if (t >= 0.0f) {
-      float y = py + t * dy;
-      if (y >= 0.0f && y <= ARENA_HEIGHT_M) best = minf(best, t);
+
+      float y =
+          py + t * dy;
+
+      if (y >= 0.0f &&
+          y <= ARENA_HEIGHT_M) {
+
+        best = minf(best, t);
+      }
     }
-    t = (ARENA_WIDTH_M - px) / dx; // x = max
+
+    // x = maximum
+
+    t =
+        (ARENA_WIDTH_M - px) / dx;
+
     if (t >= 0.0f) {
-      float y = py + t * dy;
-      if (y >= 0.0f && y <= ARENA_HEIGHT_M) best = minf(best, t);
+
+      float y =
+          py + t * dy;
+
+      if (y >= 0.0f &&
+          y <= ARENA_HEIGHT_M) {
+
+        best = minf(best, t);
+      }
     }
   }
 
-  // y = 0 / y = max
+  // ----------------------------------------------------------
+  // y = 0
+  // ----------------------------------------------------------
+
   if (absf(dy) > 1.0e-6f) {
-    float t = (0.0f - py) / dy;
+
+    float t =
+        (0.0f - py) / dy;
+
     if (t >= 0.0f) {
-      float x = px + t * dx;
-      if (x >= 0.0f && x <= ARENA_WIDTH_M) best = minf(best, t);
+
+      float x =
+          px + t * dx;
+
+      if (x >= 0.0f &&
+          x <= ARENA_WIDTH_M) {
+
+        best = minf(best, t);
+      }
     }
-    t = (ARENA_HEIGHT_M - py) / dy;
+
+    // y = maximum
+
+    t =
+        (ARENA_HEIGHT_M - py) / dy;
+
     if (t >= 0.0f) {
-      float x = px + t * dx;
-      if (x >= 0.0f && x <= ARENA_WIDTH_M) best = minf(best, t);
+
+      float x =
+          px + t * dx;
+
+      if (x >= 0.0f &&
+          x <= ARENA_WIDTH_M) {
+
+        best = minf(best, t);
+      }
     }
   }
 
-  if (best >= INF * 0.5f) return false;
+  if (best >= INF * 0.5f)
+    return false;
+
   out_dist_m = best;
+
   return true;
 }
 
@@ -787,7 +899,7 @@ float MappingNav::edgeCost(uint16_t from, uint16_t to) const {
   if (t == TERRAIN_RAMP) {
     cost *= RAMP_COST;
   } else if (t == TERRAIN_SPEED_BUMP) {
-    cost *= 1.05f;
+    cost *= SPEED_BUMP_COST;
   }
 
   return cost;

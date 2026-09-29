@@ -44,6 +44,10 @@ public:
   static constexpr int8_t LIDAR_CLOSE_HIT_SCORE = 3;
   static constexpr int8_t LIDAR_FAR_HIT_SCORE = 2;
 
+    // Sensor fusion weights
+  static constexpr float ENCODER_TRANSLATION_WEIGHT = 0.5f;
+  static constexpr float IMU_HEADING_WEIGHT = 0.8f;
+
   // Bit-packed cell format (1 byte/cell)
   // bits 0..1: occupancy, bits 2..3: terrain
   enum Occupancy : uint8_t {
@@ -112,9 +116,12 @@ public:
   Pose2D getPose() const;
 
   // Complementary fusion of encoder + optical flow + IMU gyro heading delta.
-  void updatePose(const PoseUpdateInput &input,
-                  float translation_encoder_weight = 0.5f,
-                  float heading_imu_weight = 0.8f);
+  void updatePose(
+    const PoseUpdateInput &input,
+    float translation_encoder_weight =
+        ENCODER_TRANSLATION_WEIGHT,
+    float heading_imu_weight =
+        IMU_HEADING_WEIGHT);
 
   // Occupancy update by ray-casting each reading.
   void updateGridFromSensors(const SensorRay *rays, uint16_t ray_count);
@@ -122,9 +129,11 @@ public:
   // Uses known outer walls to reduce drift when a reading agrees with boundary geometry.
   // correction_gain in [0,1], match_tolerance_m is max |expected-measured| for correction.
   void applyBoundaryCorrection(const SensorRay *rays,
-                               uint16_t ray_count,
-                               float correction_gain = 0.3f,
-                               float match_tolerance_m = 0.12f);
+                              uint16_t ray_count,
+                              float correction_gain = 0.3f,
+                              float match_tolerance_m = 0.12f,
+                              float lidar_offset_x_m = 0.0f,
+                              float lidar_offset_y_m = 0.0f);
 
   // Terrain flags are separate from occupancy and remain traversable.
   bool setTerrainAtCell(uint16_t cell_x, uint16_t cell_y, Terrain terrain);
@@ -228,8 +237,10 @@ private:
   void maybeMarkFree(uint16_t idx);
 
   // Boundary correction helpers
-  bool expectedBoundaryDistance(float ray_angle_global, float &out_dist_m) const;
-
+  bool expectedBoundaryDistance(float ray_origin_x,
+                                float ray_origin_y,
+                                float ray_angle_global,
+                                float &out_dist_m) const;
   // Inflation
   void recomputeInflation(float robot_radius_m);
 

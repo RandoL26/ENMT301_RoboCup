@@ -120,23 +120,10 @@ void RoboSLAM::processScan(LD06 &ld, const IMU_Data &imu) {
     // LD06 distance == 0 means no valid obstacle return.
     // Keep this as a no-hit ray so the free-space ray casting
     // can still work.
+    // A zero-distance reading is treated as invalid.
+    // Do NOT interpret it as "free space to max range".
     if (p->distance == 0) {
-      MappingNav::SensorRay &r = rays[valid_rays++];
-
-      r.valid = true;
-      r.has_hit = false;
-      r.kind = MappingNav::SENSOR_LIDAR;
-
-      const float ang_rad =
-          (p->angle) * (M_PI / 180.0f);
-
-      r.angle_offset_rad =
-          ang_rad + LIDAR_YAW_OFFSET_RAD;
-
-      r.distance_m = 0.0f;
-      r.max_range_m = MappingNav::LIDAR_MAX_RANGE_M;
-
-      continue;
+        continue;
     }
 
     // Reject measurements that are too close or too far away.
@@ -171,7 +158,13 @@ void RoboSLAM::processScan(LD06 &ld, const IMU_Data &imu) {
   m_nav.setPose(pose.x_m, pose.y_m, pose.theta_rad);
 
   // 7) Boundary correction + replan
-  m_nav.applyBoundaryCorrection(rays, valid_rays, 0.25f, 0.12f);
+  m_nav.applyBoundaryCorrection(
+        rays,
+        valid_rays,
+        0.25f,
+        0.12f,
+        LIDAR_OFFSET_X_M,
+        LIDAR_OFFSET_Y_M);
   const float robot_radius_m =
     sqrtf(
         (MappingNav::ROBOT_LENGTH_M * 0.5f) *
