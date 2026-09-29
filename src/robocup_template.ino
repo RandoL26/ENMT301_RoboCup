@@ -186,7 +186,6 @@ bool telemetry_imu_ok = false;
 bool telemetry_tof_ok = false;
 bool telemetry_optical_flow_ok = false;
 bool telemetry_ultrasonic_ok = false;
-bool binary_telemetry_active = OPTICAL_FLOW_SERIAL_TEST;
 
 
 bool robotStarted = false;
