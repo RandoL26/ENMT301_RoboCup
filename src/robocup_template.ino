@@ -66,7 +66,6 @@
 
 #define DCMOTOR_DEBUG 0
 
-#define LOCALISATION_DEBUG 0
 
 //**********************************************************************************
 // Local Definitions
@@ -1304,7 +1303,6 @@ void task_init() {
     taskManager.addTask(tOpticalFlow);        //reading optical flow sensor
     taskManager.addTask(tLD06_lidar);          //reading LD06 lidar
     taskManager.addTask(tLidarFrontTest);
-    taskManager.addTask(tLocalisation);        //sensor fusion localisation update
     // taskManager.addTask(tPOI_Detector);        //POI detection from ToF
     // taskManager.addTask(tToF_SearchPlanner);   //search target generation
     //taskManager.addTask(tBig_Servo);
@@ -1336,7 +1334,6 @@ void task_init() {
     tOpticalFlow.enable();
     tLD06_lidar.enable();
     tLidarFrontTest.enable();
-    tLocalisation.enable();
     tPOI_Detector.enable();
     tToF_SearchPlanner.enable();
 
