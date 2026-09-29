@@ -1,7 +1,6 @@
 #include "ld06.h"
 #include "telemetry.h"
 
-#define LD06_COMPUTE_XY 0
 
 // Diagnostic globals (defined here)
 uint16_t ld06_diag_num_points = 0;
