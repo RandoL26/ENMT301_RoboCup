@@ -8,6 +8,7 @@
 // Additional telemetry packets
 #define PACKET_STATUS          0x07
 #define PACKET_INFLATED_GRID   0x08
+#define PACKET_LOCALISATION_DEBUG 0x09
 
 // Start side
 enum TelemetryStartSide : uint8_t {
@@ -30,6 +31,16 @@ void telemetry_send_status(
     bool planner_goal_set,
     uint16_t goal_cell,
     uint16_t path_length
+);
+
+void telemetry_send_localisation_debug(
+    float encoder_dx_m,
+    float encoder_dtheta_rad,
+    float flow_dx_m,
+    float flow_dy_m,
+    float imu_dtheta_rad,
+    float imu_heading_deg,
+    const MappingNav::Pose2D &pose
 );
 
 // Send inflated obstacle grid.

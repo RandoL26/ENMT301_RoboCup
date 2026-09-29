@@ -428,8 +428,69 @@ void localisation_update_callback(void) {
 // Task wrapper for VL53L1X sensor reading
 void vl53l1x_sensor_callback(void) {
     if (tofSensorArray.isInitialized()) {
+<<<<<<< HEAD
         TOFSensorArray::TOFData tofData = tofSensorArray.readDistances();
         tofSensorArray.printDistances(tofData);
+=======
+        static bool warned = false;
+        if (!warned) {
+            Serial.println("WARNING: VL53L1X sensor array not initialized, no S0-S3 data available");
+            warned = true;
+        }
+        return;
+    }
+
+    TOFSensorArray::TOFData tofData = tofSensorArray.readDistances();
+
+    // Print VL53L1X distances inline
+    Serial.print("\t");
+    for (uint8_t i = 0; i < tofData.sensorCount; i++) {
+        Serial.print("S");
+        Serial.print(i);
+        Serial.print(":");
+        if (tofData.distances[i] == 0xFFFF) {
+            Serial.print("TIMEOUT");
+        } else {
+            Serial.print(tofData.distances[i]);
+        }
+        if (i < tofData.sensorCount - 1) Serial.print("\t");
+    }
+
+    // Top (VL53L0X) sensor handling removed; only VL53L1X array processed here.
+
+    // targetDetector.update() no longer takes a top sensor distance; it
+    // reads the lidar via the LD06 instance internally (the LD06 task
+    // already calls ld06.readScan()).
+    targetDetector.update();
+
+    // If the DFRobot Matrix Lidar (8x8) is present, print it as 8 rows
+    if (TOF_X8_isInitialized()) {
+        uint16_t x8buf[64];
+        if (TOF_X8_readAll(x8buf, 64)) {
+            // Print each row on its own line, prefixed with a tab for alignment
+            Serial.print('\n');
+            Serial.print('\n');
+            for (uint8_t y = 0; y < 8; y++) {
+                Serial.print('\t');
+                Serial.print("Y");
+                Serial.print(y);
+                Serial.print(": ");
+                for (uint8_t x = 0; x < 8; x++) {
+                    Serial.print(x8buf[y * 8 + x]);
+                    if (x < 7) Serial.print(",");
+                }
+                Serial.println();
+            }
+            Serial.print('\n');
+        } else {
+            Serial.print('\t');
+            Serial.println("X8:ERR");
+        }
+    } else {
+        // No X8 initialization; print explicit marker so absence is visible
+        Serial.print('\t');
+        Serial.println("X8:NOTINIT");
+>>>>>>> 336a10990aa0074713319b61d87377ca228d2133
     }
 }
 
@@ -686,6 +747,25 @@ void handle_motor_line(const char* line, Print* ackPort) {
     upperLine[sizeof(upperLine) - 1] = '\0';
     for (int i = 0; upperLine[i] != '\0'; i++) {
         upperLine[i] = toupper((unsigned char)upperLine[i]);
+    }
+
+    if (strcmp(upperLine, "MAP RESET") == 0) {
+        mappingNav.reset();
+        roboSlam.begin();
+        setRobotStartPosition();
+
+        cmd_left_motor = 0;
+        cmd_right_motor = 0;
+        applied_left_motor = 0;
+        applied_right_motor = 0;
+
+        if (ackPort != nullptr) {
+            ackPort->println("ACK MAP RESET");
+        } else {
+            Serial.println("ACK MAP RESET");
+        }
+
+        return;
     }
 
     int left = 0;
@@ -1103,6 +1183,13 @@ void robot_init() {
     
     printlnBoth("Initialising TOF (VL53L1X) Sensor Array...");
     Wire.setClock(400000); // use 400 kHz I2C
+<<<<<<< HEAD
+=======
+
+    // Initialize VL53L1X sensor array.
+    printlnBoth("Initialising VL53L1X Sensor Array...");
+    tofSensorArray.setXSHUTPins(VL53L1X_XSHUT_PINS, VL53L1X_SENSOR_COUNT);
+>>>>>>> 336a10990aa0074713319b61d87377ca228d2133
     
     // Set XSHUT pins for each sensor
     tofSensorArray.setXSHUTPins(VL53L1X_XSHUT_PINS, VL53L1X_SENSOR_COUNT);
@@ -1122,7 +1209,37 @@ void robot_init() {
         tofSensorArray.setDistanceOffset(0, 0);   // Sensor 0 offset
         tofSensorArray.setDistanceOffset(1, -35); // Sensor 1 offset
         tofSensorArray.setDistanceOffset(2, 0);  // Sensor 2 offset
+<<<<<<< HEAD
         tofSensorArray.setDistanceOffset(3, 0);  // Sensor 3 offset
+=======
+        tofSensorArray.setDistanceOffset(3, -5);  // Sensor 3 offset
+    }
+
+    TieredTargetDetectorConfig targetConfig;
+    targetConfig.nearIntersectMm = 200;
+    targetConfig.farIntersectMm = 400;
+    targetConfig.intersectionToleranceMm = 50;
+    // Map the prior "top sensor" semantics into the new lidar-based
+    // config: treat the old clearance/reject-margin as an expected
+    // target height and tolerance, and tighten lidar matching accordingly.
+    targetConfig.targetHeightMm = 80;
+    targetConfig.targetHeightToleranceMm = 40;
+    targetConfig.toleratedWidthMm = 50; // tolerated target lateral width (mm)
+    // Lidar matching tolerances (how closely a lidar return must match a TOF
+    // hit to be considered the same surface / an obstacle)
+    targetConfig.maxDetectionRangeMm = 800;
+    targetConfig.lidarMatchToleranceMm = 40;
+    targetConfig.lidarBearingToleranceDeg = 1.0f;
+    targetConfig.useAngleGate = false;
+    targetDetector.setConfig(targetConfig);
+
+    // Initialize optional DFRobot Matrix Lidar (8x8 matrix) if connected
+    printlnBoth("Initialising DFRobot Matrix Lidar (TOF_X8)...");
+    if (!TOF_X8_begin()) {
+        printlnBoth("WARNING: TOF_X8 initialization failed or not present");
+    } else {
+        printlnBoth("TOF_X8 initialized successfully");
+>>>>>>> 336a10990aa0074713319b61d87377ca228d2133
     }
     
     printlnBoth("Initialising IMU (BNO055)...");
@@ -1219,8 +1336,12 @@ void task_init() {
     taskManager.addTask(tBT_stream_test);  // Disabled for control reliability
     taskManager.addTask(tOpticalFlow);        //reading optical flow sensor
     taskManager.addTask(tLD06_lidar);          //reading LD06 lidar
+<<<<<<< HEAD
     taskManager.addTask(tLidarFrontTest);
     // taskManager.addTask(tLocalisation);        //sensor fusion localisation update
+=======
+    taskManager.addTask(tLocalisation);        //sensor fusion localisation update
+>>>>>>> 336a10990aa0074713319b61d87377ca228d2133
     // taskManager.addTask(tPOI_Detector);        //POI detection from ToF
     // taskManager.addTask(tToF_SearchPlanner);   //search target generation
     //taskManager.addTask(tBig_Servo);

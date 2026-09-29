@@ -22,8 +22,31 @@ public:
   static constexpr float ROBOT_LENGTH_M = 0.370f;
   static constexpr float ROBOT_WIDTH_M  = 0.210f;
 
+  // Navigation cost tuning
+  // Unknown cells are still traversable, but more expensive.
+  static constexpr float UNKNOWN_CELL_COST = 1.50f;
+
+  // Terrain penalties.
+  static constexpr float RAMP_COST = 1.10f;
+  static constexpr float SPEED_BUMP_COST = 1.05f;
+
   // Additional clearance around the robot.
   static constexpr float ROBOT_SAFETY_MARGIN_M = 0.030f;
+
+  // LiDAR filtering
+  // Change these values to tune the usable LiDAR range.
+  static constexpr float LIDAR_MIN_RANGE_M = 0.05f;
+  static constexpr float LIDAR_MAX_RANGE_M = 8.0f;
+
+    // LiDAR occupancy confidence
+  // Closer returns receive stronger confidence.
+  static constexpr float LIDAR_CLOSE_RANGE_M = 1.0f;
+  static constexpr int8_t LIDAR_CLOSE_HIT_SCORE = 3;
+  static constexpr int8_t LIDAR_FAR_HIT_SCORE = 2;
+
+    // Sensor fusion weights
+  static constexpr float ENCODER_TRANSLATION_WEIGHT = 0.5f;
+  static constexpr float IMU_HEADING_WEIGHT = 0.8f;
 
   // Bit-packed cell format (1 byte/cell)
   // bits 0..1: occupancy, bits 2..3: terrain
@@ -65,7 +88,8 @@ public:
 
   enum SensorKind : uint8_t {
     SENSOR_TOF = 0,
-    SENSOR_ULTRASONIC = 1
+    SENSOR_ULTRASONIC = 1,
+    SENSOR_LIDAR = 2
   };
 
   // Generic ray-like range reading.
@@ -92,9 +116,12 @@ public:
   Pose2D getPose() const;
 
   // Complementary fusion of encoder + optical flow + IMU gyro heading delta.
-  void updatePose(const PoseUpdateInput &input,
-                  float translation_encoder_weight = 0.5f,
-                  float heading_imu_weight = 0.8f);
+  void updatePose(
+    const PoseUpdateInput &input,
+    float translation_encoder_weight =
+        ENCODER_TRANSLATION_WEIGHT,
+    float heading_imu_weight =
+        IMU_HEADING_WEIGHT);
 
   // Occupancy update by ray-casting each reading.
   void updateGridFromSensors(const SensorRay *rays, uint16_t ray_count);
@@ -102,9 +129,11 @@ public:
   // Uses known outer walls to reduce drift when a reading agrees with boundary geometry.
   // correction_gain in [0,1], match_tolerance_m is max |expected-measured| for correction.
   void applyBoundaryCorrection(const SensorRay *rays,
-                               uint16_t ray_count,
-                               float correction_gain = 0.3f,
-                               float match_tolerance_m = 0.12f);
+                              uint16_t ray_count,
+                              float correction_gain = 0.3f,
+                              float match_tolerance_m = 0.12f,
+                              float lidar_offset_x_m = 0.0f,
+                              float lidar_offset_y_m = 0.0f);
 
   // Terrain flags are separate from occupancy and remain traversable.
   bool setTerrainAtCell(uint16_t cell_x, uint16_t cell_y, Terrain terrain);
@@ -208,8 +237,10 @@ private:
   void maybeMarkFree(uint16_t idx);
 
   // Boundary correction helpers
-  bool expectedBoundaryDistance(float ray_angle_global, float &out_dist_m) const;
-
+  bool expectedBoundaryDistance(float ray_origin_x,
+                                float ray_origin_y,
+                                float ray_angle_global,
+                                float &out_dist_m) const;
   // Inflation
   void recomputeInflation(float robot_radius_m);
 

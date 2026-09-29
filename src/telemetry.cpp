@@ -170,6 +170,69 @@ void telemetry_send_pose_and_path(const MappingNav &nav) {
   free(cells);
 }
 
+void telemetry_send_localisation_debug(
+    float encoder_dx_m,
+    float encoder_dtheta_rad,
+    float flow_dx_m,
+    float flow_dy_m,
+    float imu_dtheta_rad,
+    float imu_heading_deg,
+    const MappingNav::Pose2D &pose) {
+
+  // Payload:
+  //
+  // encoder_dx_m       4 bytes
+  // encoder_dtheta    4 bytes
+  // flow_dx_m         4 bytes
+  // flow_dy_m         4 bytes
+  // imu_dtheta_rad    4 bytes
+  // imu_heading_deg   4 bytes
+  // pose_x_m          4 bytes
+  // pose_y_m          4 bytes
+  // pose_theta_rad    4 bytes
+  //
+  // Total = 36 bytes
+
+  const uint16_t payload_len = 36;
+
+  uint8_t payload[payload_len];
+
+  uint8_t *ptr = payload;
+
+  memcpy(ptr, &encoder_dx_m, 4);
+  ptr += 4;
+
+  memcpy(ptr, &encoder_dtheta_rad, 4);
+  ptr += 4;
+
+  memcpy(ptr, &flow_dx_m, 4);
+  ptr += 4;
+
+  memcpy(ptr, &flow_dy_m, 4);
+  ptr += 4;
+
+  memcpy(ptr, &imu_dtheta_rad, 4);
+  ptr += 4;
+
+  memcpy(ptr, &imu_heading_deg, 4);
+  ptr += 4;
+
+  memcpy(ptr, &pose.x_m, 4);
+  ptr += 4;
+
+  memcpy(ptr, &pose.y_m, 4);
+  ptr += 4;
+
+  memcpy(ptr, &pose.theta_rad, 4);
+
+  send_frame(
+      1,
+      PACKET_LOCALISATION_DEBUG,
+      payload,
+      payload_len
+  );
+}
+
 void telemetry_send_grid_keyframe(const MappingNav &nav) {
   const uint8_t *grid = nav.getGridData();
   uint16_t width = MappingNav::GRID_WIDTH;
