@@ -419,10 +419,6 @@ void localisation_update_callback(void) {
 // Task wrapper for VL53L1X sensor reading
 void vl53l1x_sensor_callback(void) {
     if (tofSensorArray.isInitialized()) {
-<<<<<<< HEAD
-        TOFSensorArray::TOFData tofData = tofSensorArray.readDistances();
-        tofSensorArray.printDistances(tofData);
-=======
         static bool warned = false;
         if (!warned) {
             Serial.println("WARNING: VL53L1X sensor array not initialized, no S0-S3 data available");
@@ -481,7 +477,6 @@ void vl53l1x_sensor_callback(void) {
         // No X8 initialization; print explicit marker so absence is visible
         Serial.print('\t');
         Serial.println("X8:NOTINIT");
->>>>>>> 336a10990aa0074713319b61d87377ca228d2133
     }
 }
 
@@ -1176,13 +1171,10 @@ void robot_init() {
     
     printlnBoth("Initialising TOF (VL53L1X) Sensor Array...");
     Wire.setClock(400000); // use 400 kHz I2C
-<<<<<<< HEAD
-=======
 
     // Initialize VL53L1X sensor array.
     printlnBoth("Initialising VL53L1X Sensor Array...");
     tofSensorArray.setXSHUTPins(VL53L1X_XSHUT_PINS, VL53L1X_SENSOR_COUNT);
->>>>>>> 336a10990aa0074713319b61d87377ca228d2133
     
     // Set XSHUT pins for each sensor
     tofSensorArray.setXSHUTPins(VL53L1X_XSHUT_PINS, VL53L1X_SENSOR_COUNT);
@@ -1202,9 +1194,6 @@ void robot_init() {
         tofSensorArray.setDistanceOffset(0, 0);   // Sensor 0 offset
         tofSensorArray.setDistanceOffset(1, -35); // Sensor 1 offset
         tofSensorArray.setDistanceOffset(2, 0);  // Sensor 2 offset
-<<<<<<< HEAD
-        tofSensorArray.setDistanceOffset(3, 0);  // Sensor 3 offset
-=======
         tofSensorArray.setDistanceOffset(3, -5);  // Sensor 3 offset
     }
 
@@ -1232,7 +1221,6 @@ void robot_init() {
         printlnBoth("WARNING: TOF_X8 initialization failed or not present");
     } else {
         printlnBoth("TOF_X8 initialized successfully");
->>>>>>> 336a10990aa0074713319b61d87377ca228d2133
     }
     
     printlnBoth("Initialising IMU (BNO055)...");
@@ -1329,12 +1317,7 @@ void task_init() {
     taskManager.addTask(tBT_stream_test);  // Disabled for control reliability
     taskManager.addTask(tOpticalFlow);        //reading optical flow sensor
     taskManager.addTask(tLD06_lidar);          //reading LD06 lidar
-<<<<<<< HEAD
-    taskManager.addTask(tLidarFrontTest);
-    // taskManager.addTask(tLocalisation);        //sensor fusion localisation update
-=======
     taskManager.addTask(tLocalisation);        //sensor fusion localisation update
->>>>>>> 336a10990aa0074713319b61d87377ca228d2133
     // taskManager.addTask(tPOI_Detector);        //POI detection from ToF
     // taskManager.addTask(tToF_SearchPlanner);   //search target generation
     //taskManager.addTask(tBig_Servo);
