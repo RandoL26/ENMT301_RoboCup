@@ -382,8 +382,8 @@ void ld06_lidar_callback(void) {
         scan_ready_count++;
     }
     if (scanReady) {
-        // Feed on-board RoboSLAM then also emit Teleplot for external tools if needed
-        roboSlam.processScan(ld06);
+        // Emit the scan telemetry before CPU-heavy SLAM work so the visualiser
+        // receives fresh LiDAR data even when scan matching is busy.
         
         // Diagnostic print: number of points available for telemetry
 
@@ -392,6 +392,8 @@ void ld06_lidar_callback(void) {
         scan_telemetry_call_count++;
         last_scan_point_count = ld06.getNbPointsInScan();
         telemetry_send_downsampled_scan(ld06, mappingNav, 48);
+
+        roboSlam.processScan(ld06);
 
 #if TELEMETRY_ALLOW_ASCII_TELEPLOT
         Serial.print("TELEM SCAN POINTS=");
