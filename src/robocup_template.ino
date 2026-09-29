@@ -13,7 +13,7 @@
  ******************************************************************************/
 
 #include <Servo.h>                  //control the DC motors
-#include "Herkulex.h"             //smart servo (uses hardware Serial: pins 0 (RX), 1 (TX))
+// Herkulex support removed
 #include <Adafruit_TCS34725.h>      //colour sensor
 #include <Wire.h>                   //for I2C and SPI
 #include <TaskScheduler.h>          //scheduler
@@ -100,7 +100,7 @@
 #define TOF_SEARCH_PLANNER_PERIOD           500  // 2 Hz: generate search targets less frequently
 #define TOF_SEARCH_PLANNER_NUM_EXECUTE      -1
 
-#define HERKULEX_TEST_PERIOD               1200
+// Herkulex test period removed
 
 
 
@@ -194,12 +194,7 @@ const unsigned long START_BUTTON_DEBOUNCE_MS = 50;
 //electromagnet PIN definition
 #define MAGNET_PIN 26
 
-// Herkulex smart servo ID (broadcast ID 0xfe)
-#define HERKULEX_ID 1
-
-// Herkulex serial pins when using SoftwareSerial (rx, tx)
-#define HERKULEX_RX_PIN 0
-#define HERKULEX_TX_PIN 1
+// Herkulex support removed
 
 // Serial deffinitions
 #define BAUD_RATE 115200
@@ -879,18 +874,7 @@ bool handle_sensor_line(const char* line, Print* ackPort) {
     return false;
 }
 
-// Herkulex continuous test callback: toggles between -100 and 100 degrees
-void herkulex_test_callback() {
-    static bool toggle = false;
-    int angle = toggle ? 100 : -100;
-    int led = toggle ? LED_GREEN : LED_BLUE;
-    Herkulex.torqueON(HERKULEX_ID);
-    Herkulex.moveOneAngle(HERKULEX_ID, angle, 1000, led);
-    Herkulex.moveOneAngle(HERKULEX_ID, -100, 1000, LED_BLUE);
-    //printfBoth("Herkulex test move to %d\n", Herkulex.getPosition(HERKULEX_ID));
-    toggle = !toggle;
-}
-int angle = 0;
+int angle = 0; // reused by big servo
 void big_servo_callback() {
     
     if (angle<50){
@@ -929,7 +913,7 @@ Task tLocalisation(LOCALISATION_UPDATE_PERIOD, LOCALISATION_UPDATE_NUM_EXECUTE, 
 Task tPOI_Detector(POI_DETECTOR_UPDATE_PERIOD, POI_DETECTOR_UPDATE_NUM_EXECUTE, &poi_detector_callback);
 Task tToF_SearchPlanner(TOF_SEARCH_PLANNER_PERIOD, TOF_SEARCH_PLANNER_NUM_EXECUTE, &tof_search_planner_callback);
 Task tSensor_average(SENSOR_AVERAGE_PERIOD,      SENSOR_AVERAGE_NUM_EXECUTE,      &sensor_average);
-Task tHerkulexTest(HERKULEX_TEST_PERIOD, -1, &herkulex_test_callback);
+// Herkulex test task removed
 Task tBT_stream_test(200, -1, &bt_stream_test_callback);  // Stream test: every 200ms
 
 // Task for DC motor control
@@ -1132,35 +1116,7 @@ void robot_init() {
         Serial.println("✗ Bluetooth initialization failed!");
     }
 
-    // Initialise Herkulex smart servo using a hardware UART (avoids SoftwareSerial)
-    // On Teensy/Mega use Serial1 (pins 0/1 on many boards)
-    printlnBoth("Initialising Herkulex Smart Servo on Serial1...");
-    Herkulex.begin(115200, HERKULEX_RX_PIN, HERKULEX_TX_PIN);
-    delay(100);
-    Herkulex.reboot(HERKULEX_ID);
-    delay(500);
-    Herkulex.clearError(HERKULEX_ID);
-    Herkulex.ACK(1);  // Set ACK mode to 1 (ACK on error only)
-    Herkulex.set_ID(HERKULEX_ID, HERKULEX_ID);  // Ensure servo ID is set correctly
-    Herkulex.torqueON(HERKULEX_ID);
-    Herkulex.initialize();
-
-    delay(200);
-    printlnBoth("Herkulex Smart Servo initialized\n");
-    // Diagnostics: read status, model and position
-    int hk_stat = Herkulex.stat(HERKULEX_ID);
-    int hk_model = Herkulex.model();
-    int hk_pos = Herkulex.getPosition(HERKULEX_ID);
-    printfBoth("Herkulex stat: %d | model: %d | position: %d\n", hk_stat, hk_model, hk_pos);
-
-    // If status OK (0) then perform startup test move
-    
-    printlnBoth("Herkulex startup test move: moving to -100 then 100\n");
-    Herkulex.moveOneAngle(HERKULEX_ID, -100, 1000, LED_BLUE);
-    delay(1200);
-    Herkulex.moveOneAngle(HERKULEX_ID, 100, 1000, LED_GREEN);
-    delay(1200);
-    printlnBoth("Herkulex test move complete\n");
+    // Herkulex support removed: initialization omitted
     
     
     printlnBoth("Initialising IR XY Position Sensor...");
@@ -1385,7 +1341,7 @@ void task_init() {
   tBig_Servo.enable();
 //   tCheck_watchdog.enable();
 //   tVictory_dance.enable();
-   tHerkulexTest.enable();
+    // Herkulex test task removed
     tBT_stream_test.enable();  // Disabled for control reliability
     tOpticalFlow.enable();
     tLD06_lidar.enable();
