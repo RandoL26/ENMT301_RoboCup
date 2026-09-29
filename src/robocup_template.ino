@@ -461,7 +461,7 @@ void vl53l1x_sensor_callback(void) {
     Serial.print("\n");
 
     #if TOF_DEBUG
-#if TELEMETRY_ALLOW_ASCII_TELEPLOT
+    #if TELEMETRY_ALLOW_ASCII_TELEPLOT
     Serial.print("\t");
 
     for (uint8_t i = 0; i < tofData.sensorCount; i++) {

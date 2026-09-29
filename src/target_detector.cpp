@@ -440,25 +440,6 @@ bool TieredTargetDetector::update() {
     bool currentCandidate =
         tofCandidate;
 
-    // A ToF pair match alone is NOT enough to start target tracking.
-    // The LiDAR must see a separate physical object as well.
-    bool separateLidarObstacle = false;
-
-    if (tofCandidate) {
-        const GridPoint& tofCandidatePoint =
-            nearCandidate ? nearTierPoint : farTierPoint;
-
-        separateLidarObstacle =
-            hasSeparateLidarObstacle(tofCandidatePoint);
-    }
-
-    bool targetCandidate =
-        tofCandidate &&
-        separateLidarObstacle &&
-        !anyObstacle;
-
-    bool currentCandidate = targetCandidate;
-
     GridPoint currentCandidatePoint;
 
     if (currentCandidate) {
