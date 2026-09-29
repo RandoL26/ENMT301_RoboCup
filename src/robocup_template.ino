@@ -193,6 +193,9 @@ bool robotStarted = false;
 // Set true to route USB/Bluetooth MOTOR commands directly to the motor task.
 // Leave false to use the autonomous navigator.
 bool manual_motor_control_enabled = false;
+static bool autonomous_stop_requested = false;
+static bool weight_detection_latched = false;
+static bool weight_search_forward_requested = false;
 static const unsigned long AUTONOMOUS_SCAN_INTERVAL_MS = 10000;
 static const float AUTONOMOUS_SCAN_TARGET_RAD = 6.28319f; // One full rotation
 static const int16_t AUTONOMOUS_SCAN_SPEED = 28;
@@ -203,6 +206,7 @@ static unsigned long autonomous_scan_last_sample_ms = 0;
 static unsigned long last_lidar_scan_ms = 0;
 
 bool pickingUp = false;
+int collect_time = 0;
 // DC Motor PIN definitions
 #define DC_M1_PIN 0              //PWM pin for DC motor control (can be extended to 2 motors)
 #define DC_M2_PIN 1              //PWM pin for DC motor control (can be extended to 2 motors)
@@ -364,20 +368,19 @@ void ultrasonic_sensor_callback(void) {
 void optical_flow_callback(void) {
     int16_t dx = 0, dy = 0;
     if (opticalFlow.read(dx, dy)) {
-        // accumulate counts and print total distance in mm
+        // Accumulate readings without putting recurring text output on the
+        // cooperative scheduler's hot path.
         opticalFlow.addMotionCounts(dx, dy);
-        float tx = opticalFlow.getTotalXmm();
-        float ty = opticalFlow.getTotalYmm();
         optical_flow_update_count++;  // DIAGNOSTIC
 #if OPTICAL_FLOW_SERIAL_TEST
+        const float tx = opticalFlow.getTotalXmm();
+        const float ty = opticalFlow.getTotalYmm();
         static uint32_t lastPrintMs = 0;
         const uint32_t now = millis();
         if (now - lastPrintMs >= 200) {
             Serial.printf("X=%.2f mm, Y=%.2f mm\n", tx, ty);
             lastPrintMs = now;
         }
-#else
-        printfBoth("OpticalFlow totalX: %.2f mm  totalY: %.2f mm\n", tx, ty);
 #endif
         #if OPTICAL_FLOW_DEBUG
         Serial.printf("OpticalFlow totalX: %.2f mm  totalY: %.2f mm\n",
@@ -781,12 +784,24 @@ static bool lidar_blocks_motion(int16_t left_speed, int16_t right_speed) {
 }
 
 void dc_motor_callback(void) {
-    if (!robotStarted) {
+    if (!robotStarted || autonomous_stop_requested) {
         cmd_left_motor = 0;
         cmd_right_motor = 0;
         applied_left_motor = 0;
         applied_right_motor = 0;
         driveMotor.setSpeeds(0, 0);
+        return;
+    }
+
+    // Hold position while the existing non-blocking servo pickup task runs.
+    if (pickingUp) {
+        autonomous_scan_active = false;
+        autonomous_last_scan_ms = millis();
+        cmd_left_motor = 0;
+        cmd_right_motor = 0;
+        applied_left_motor = 0;
+        applied_right_motor = 0;
+        driveMotor.stop();
         return;
     }
 
@@ -856,6 +871,11 @@ void dc_motor_callback(void) {
                 left_target = -AUTONOMOUS_SCAN_SPEED;
                 right_target = AUTONOMOUS_SCAN_SPEED;
             }
+        } else if (weight_search_forward_requested) {
+            // Straight weight-search motion is still routed through this
+            // callback so slew limiting and the LiDAR interlock remain active.
+            left_target = 80;
+            right_target = 80;
         } else {
             // Follow a short look-ahead point on the existing MappingNav path.
             MappingNav::CellCoord path[8];
@@ -896,12 +916,10 @@ void dc_motor_callback(void) {
                     right_target = forward_speed + correction;
                 }
             } else {
-                // If there is no goal yet or path planning is still producing
-                // one, start with a slow straight command. A one-cell path
-                // means the goal has been reached, so hold position then.
-                // The LiDAR interlock below stops motion for stale scans or
-                // an obstacle ahead.
-                if (!mappingNav.isGoalSet() || mappingNav.getPathLength() == 0) {
+                // With no confirmed target, keep exploring if a goal/path is
+                // pending, complete, or unavailable. The LiDAR interlock below
+                // still stops for stale scans or an obstacle ahead.
+                if (!targetDetector.isTargetConfirmed()) {
                     left_target = 80;
                     right_target = 80;
                 }
@@ -1051,6 +1069,7 @@ void process_usb_motor_commands(void) {
 // Supported commands:
 //   MOTOR <left> <right>           where left/right are in [-100, 100]
 //   STOP
+//   START                          resume autonomous mode after STOP
 //   PID ... / SYNC ...             handled by motor_control.cpp
 //   FLOW RESET                     reset accumulated optical-flow totals
 //   FLOW STATUS                    print optical-flow totals (mm)
@@ -1109,6 +1128,27 @@ void handle_motor_line(const char* line, Print* ackPort) {
         return;
     }
 
+    if (strcmp(upperLine, "STOP") == 0) {
+        autonomous_stop_requested = true;
+        cmd_left_motor = 0;
+        cmd_right_motor = 0;
+        applied_left_motor = 0;
+        applied_right_motor = 0;
+        autonomous_scan_active = false;
+        driveMotor.stop();
+        if (ackPort != nullptr) ackPort->println("ACK STOP");
+        return;
+    }
+
+    if (strcmp(upperLine, "START") == 0 || strcmp(upperLine, "AUTO") == 0) {
+        autonomous_stop_requested = false;
+        robotStarted = true;
+        exploration_goal_needs_update = !targetDetector.isTargetConfirmed();
+        autonomous_last_scan_ms = millis();
+        if (ackPort != nullptr) ackPort->println("ACK AUTO");
+        return;
+    }
+
     int left = 0;
     int right = 0;
     printBoth("processing command");
@@ -1126,16 +1166,6 @@ void handle_motor_line(const char* line, Print* ackPort) {
             ackPort->print(" ");
             ackPort->println(cmd_right_motor);
             printBoth("received command");
-        }
-        return;
-    }
-
-    if (strcmp(upperLine, "STOP") == 0) {
-        cmd_left_motor = 0;
-        cmd_right_motor = 0;
-        cmd_last_rx_ms = millis();
-        if (ackPort != nullptr) {
-            ackPort->println("ACK STOP");
         }
         return;
     }
@@ -1214,7 +1244,6 @@ void big_servo_callback() {
     }
     if (pickingUp) {
         collect_time++;
-
         collect_weight(collect_time);
         if (collect_time >= 70) {
             pickingUp = false;
@@ -1349,7 +1378,6 @@ void setRobotStartPosition()
 //**********************************************************************************
 void setup() {
   Serial.begin(BAUD_RATE);
-  delay(2000);  // Give USB serial time to stabilize
   Serial.println("\n\n=== RoboCup Robot Starting ===");
   
   // CH9143 two-chip bridge architecture:
@@ -1376,6 +1404,7 @@ void setup() {
   visualiser_path_preview_active = false;
   autonomous_scan_active = false;
   autonomous_last_scan_ms = now;
+  autonomous_stop_requested = false;
   robotStarted = true;
   printlnBoth("POWER-ON AUTONOMY STARTED");
   // Now that Bluetooth is initialized, send startup message
@@ -1624,7 +1653,7 @@ void task_init() {
   // taskManager.addTask(tRead_infrared);
   // taskManager.addTask(tRead_colour);
   taskManager.addTask(tRead_imu);          //reading IMU
-    // taskManager.addTask(tProximity_sensor);  //reading proximity sensor
+    taskManager.addTask(tProximity_sensor);  //reading proximity sensor
     // taskManager.addTask(tUltrasonic_sensor);  //reading ultrasonic sensor
     // taskManager.addTask(tColor_sensor);       //reading color sensor
     // taskManager.addTask(tIR_XY_Position);     //reading IR XY position sensor
@@ -1644,20 +1673,20 @@ void task_init() {
 
     // taskManager.addTask(tHerkulexTest);
     //taskManager.addTask(tBT_stream_test);  // Disabled for control reliability
-    taskManager.addTask(tOpticalFlow);        //reading optical flow sensor
-    taskManager.addTask(tLD06_lidar);          //reading LD06 lidar
+    // taskManager.addTask(tOpticalFlow);        //reading optical flow sensor
+    // taskManager.addTask(tLD06_lidar);          //reading LD06 lidar
     // taskManager.addTask(tLidarFrontTest); // Disabled to avoid debug spam.
     // taskManager.addTask(tLocalisation);        //sensor fusion localisation update
-    taskManager.addTask(tPosePrediction);
-    taskManager.addTask(tPOI_Detector);        //POI detection from ToF
-    taskManager.addTask(tToF_SearchPlanner);   //search target generation
-    //taskManager.addTask(tBig_Servo);
+    // taskManager.addTask(tPosePrediction);
+    // taskManager.addTask(tPOI_Detector);        //POI detection from ToF
+    // taskManager.addTask(tToF_SearchPlanner);   //search target generation
+    taskManager.addTask(tBig_Servo);
     //enable the tasks
 //   tRead_ultrasonic.enable();
 //   tRead_infrared.enable();
 //   tRead_colour.enable();
   tRead_imu.enable();
-  //tProximity_sensor.enable();
+  tProximity_sensor.enable();
   //tUltrasonic_sensor.enable();
   //tColor_sensor.enable();
   //tIR_XY_Position.enable();
@@ -1671,18 +1700,18 @@ void task_init() {
 //   tReturn_to_base.enable();
 //   tDetect_base.enable();
 //   tUnload_weights.enable();
-  //tBig_Servo.enable();
+  tBig_Servo.enable();
 //   tCheck_watchdog.enable();
 //   tVictory_dance.enable();
     // Herkulex test task removed
    //tHerkulexTest.enable();
     //tBT_stream_test.enable();  // Disabled for control reliability
-    tOpticalFlow.enable();
-    tLD06_lidar.enable();
+    // tOpticalFlow.enable();
+    // tLD06_lidar.enable();
     // tLidarFrontTest.enable(); // Disabled to avoid debug spam.
-    tPosePrediction.enable();
-    tPOI_Detector.enable();
-    tToF_SearchPlanner.enable();
+    // tPosePrediction.enable();
+    // tPOI_Detector.enable();
+    // tToF_SearchPlanner.enable();
 
  printlnBoth("Tasks have been initialised \n");
 }
@@ -1731,7 +1760,7 @@ void send_robot_status_telemetry()
         mappingNav.getPathLength(),
 
         robotStarted,
-        digitalRead(START_BUTTON_PIN) == LOW,
+        digitalRead(START_BUTTON_PIN) == HIGH,
         target_navigation_active,
         visualiser_path_preview_active
     );
@@ -1740,9 +1769,12 @@ void send_robot_status_telemetry()
 // put your main code here, to run repeatedly
 //**********************************************************************************
 void loop() {
+    
+    driveMotor.setSpeeds(100, 100);
+
     process_bluetooth_motor_commands();
     process_usb_motor_commands();
-
+    
     taskManager.execute();
 
     static unsigned long last_status_ms = 0;
