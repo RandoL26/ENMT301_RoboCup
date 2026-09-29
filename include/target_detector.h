@@ -12,21 +12,28 @@ enum class TierDetectionResult {
     Indeterminate
 };
 
+enum class TargetTrackingState {
+    NONE,
+    FAR_CANDIDATE,
+    APPROACHING,
+    NEAR_CONFIRMING,
+    TARGET_CONFIRMED,
+    MOVING_OBJECT
+};
+
 // ---------------------------------------------------------------------------
 // Shared coordinate frame used by both the TOF sensors and the lidar.
 //
-// Convention (chosen to match the LD06's own coordinate system exactly, so
-// its DataPoint.x/.y can be compared directly against a TOF hit point with
-// no extra conversion):
-//   - origin (0,0) : a fixed reference point on the robot chassis (see the
-//                     defaults in target_detector.cpp for where this project
-//                     currently puts it)
-//   - +X            : straight ahead of the robot
-//   - +Y            : to the robot's RIGHT
-//   - angles (deg)  : measured CLOCKWISE from +X ("straight ahead")
-// This matches the LD06 datasheet's coordinate system definition (left-handed,
-// rotation center = origin, angle increases clockwise from the sensor's
-// forward mark), so lidar points need no sign-flip to line up with TOF points.
+// Robot coordinate convention:
+//   - origin (0,0) : midpoint of the robot
+//   - +X            : robot's RIGHT
+//   - -X            : robot's LEFT
+//   - +Y            : toward the REAR of the robot
+//   - -Y            : toward the FRONT of the robot
+//
+// All dimensions are in mm.
+//
+// TOF sensor positions are measured relative to this origin.
 // ---------------------------------------------------------------------------
 struct GridPoint {
     float x = 0.0f;
@@ -37,40 +44,25 @@ struct GridPoint {
         return valid ? sqrtf(x * x + y * y) : -1.0f;
     }
     float bearingFromOriginDeg() const {
-        return valid ? atan2f(y, x) * 180.0f / PI : 0.0f;
+    // Robot frame:
+    //   0°   = front (-Y)
+    //   +90° = right (+X)
+    //   -90° = left (-X)
+    return valid ? atan2f(x, -y) * 180.0f / PI : 0.0f;
     }
 };
 
-// Fixed mounting definition for one TOF sensor: where it sits on the robot
-// (relative to the shared origin above) and which way its boresight points.
-// boresightDeg uses the same clockwise-from-+X convention as GridPoint.
 struct SensorMount {
     float xMm = 0.0f;
     float yMm = 0.0f;
     float boresightDeg = 0.0f;
-
-    // Build a mount at (mountXMm, mountYMm) whose boresight is aimed to
-    // converge with the opposite sensor of its tier on the robot's
-    // centerline (y = 0), given the RAW straight-line sensor-to-crossing
-    // distance (i.e. what the TOF sensor itself would read at the design
-    // crossing point -- this is the same quantity nearIntersectMm /
-    // farIntersectMm represent below).
-    static SensorMount aimedAtCenterlineCrossing(float mountXMm, float mountYMm, float rawIntersectMm) {
-        SensorMount m;
-        m.xMm = mountXMm;
-        m.yMm = mountYMm;
-        float underSqrt = rawIntersectMm * rawIntersectMm - mountYMm * mountYMm;
-        float forwardLegMm = underSqrt > 0.0f ? sqrtf(underSqrt) : 0.0f;
-        m.boresightDeg = atan2f(-mountYMm, forwardLegMm) * 180.0f / PI;
-        return m;
-    }
 };
 
 struct TieredTargetDetectorConfig {
     // --- Tier geometry validation (raw sensor-to-crossing distance, same
     //     role these fields had before -- used by pairMatch()) ---
-    uint16_t nearIntersectMm = 100;
-    uint16_t farIntersectMm = 175;
+    uint16_t nearIntersectMm = 200;
+    uint16_t farIntersectMm = 400;
     uint16_t targetHeightMm = 70;
     uint16_t targetHeightToleranceMm = 20;
     uint16_t toleratedWidthMm = 50;
@@ -90,6 +82,27 @@ struct TieredTargetDetectorConfig {
     float detectionAngleMinDeg = -90.0f;
     float detectionAngleMaxDeg = 90.0f;
     bool useAngleGate = false;
+
+    // --- Target confidence ---
+    uint8_t farDetectionConfidence = 20;
+    uint8_t nearDetectionConfidence = 35;
+    uint8_t positionConsistencyConfidence = 15;
+    uint8_t lidarConfidence = 10;
+
+    uint8_t targetConfirmThreshold = 70;
+    uint8_t candidateExpireThreshold = 20;
+
+    uint16_t candidateTimeoutMs = 500;
+    uint16_t positionToleranceMm = 60;
+
+    uint8_t farCandidateThreshold = 20;
+    uint8_t approachingThreshold = 40;
+    uint8_t nearConfirmThreshold = 70;
+
+    uint16_t approachingDistanceToleranceMm = 80;
+    uint16_t nearConfirmationDistanceMm = 275;
+    uint16_t movingObjectThresholdMm = 100;
+
 };
 
 class TieredTargetDetector {
@@ -124,6 +137,14 @@ public:
     const char* resultToString(TierDetectionResult result) const;
     void debugPrint() const;
     void debugPrintGrid(Stream& serialport) const; // teleplot-style xy dump, see ld06.cpp printScanTeleplot
+    void debugPrintLidarFrontTest() const;
+
+    uint8_t getTargetConfidence() const;
+    bool isTargetLatched() const;
+    bool isMovingObjectDetected() const;
+
+    TargetTrackingState getTrackingState() const;
+    const char* trackingStateToString(TargetTrackingState state) const;
 
     struct DetectionDebug {
         uint16_t nearA;
@@ -143,6 +164,9 @@ public:
         GridPoint farBPoint;
         bool steeringActive;
         float steeringValue; // -1 (full left) .. 0 (centered) .. +1 (full right)
+        uint8_t targetConfidence;
+        bool targetLatched;
+        bool movingObjectDetected;
     };
 
     const DetectionDebug& getDebug() const;
@@ -172,9 +196,21 @@ private:
     bool withinDetectionEnvelope(uint16_t rangeMm) const;
     GridPoint tofPointFromRange(const SensorMount& mount, uint16_t rangeMm) const;
     GridPoint midpoint(const GridPoint& a, const GridPoint& b) const;
+
+    GridPoint lidarPointToRobotGrid(const DataPoint& point) const;
+
     bool isObstacleAgainstLidar(const GridPoint& tofPoint) const;
     bool findNearestLidarAtBearing(float bearingDeg, float toleranceDeg, float& outDistanceMm) const;
     float computeSteering(const GridPoint& hit, const SensorMount& mountA, const SensorMount& mountB) const;
+
+    uint8_t targetConfidence;
+    bool targetLatched;
+    bool movingObjectDetected;
+
+    TargetTrackingState trackingState;
+
+    GridPoint lastCandidatePoint;
+    uint32_t lastCandidateUpdateMs;
 };
 
 #endif // TIER_TARGET_DETECTOR_H
