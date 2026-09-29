@@ -107,6 +107,7 @@ IMU_Data read_imu(void) {
     imu_data.gyro_x = ((float)gyro_data.x - gyro_bias_x) * dps_to_rad_s;
     imu_data.gyro_y = ((float)gyro_data.y - gyro_bias_y) * dps_to_rad_s;
     imu_data.gyro_z = ((float)gyro_data.z - gyro_bias_z) * dps_to_rad_s;
+    imu_data.gyro_valid = true;
   } else {
     Serial.print("Gyro read failed: ");
     Serial.println(comres);

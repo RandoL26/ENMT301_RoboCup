@@ -1,39 +1,52 @@
-// Lightweight on-board SLAM-like integrator that feeds MappingNav
 #ifndef ROBOSLAM_H_
 #define ROBOSLAM_H_
 
 #include "MappingNav.h"
 #include "ld06.h"
 #include "motor_control.h"
-#include "optical_flow.h"
 #include "imu_sensor.h"
-#include "BNO055_support.h"
+#include "odometry_config.h"
 
 class RoboSLAM {
 public:
-  RoboSLAM(MappingNav &nav, MotorControl &motors, OpticalFlow &flow);
+  RoboSLAM(MappingNav &nav, MotorControl &motors);
   void begin();
-  // Called when a full LD06 scan is available
-  void processScan(LD06 &ld, const IMU_Data &imu);
-
-  // Configuration
-  void setEncoderPulsesPerMeter(float p) { pulses_per_meter = p; }
-  void setWheelBaseMeters(float wb) { wheel_base_m = wb; }
+  // Call from the 10 ms prediction task. Encoder calibration remains disabled
+  // until encoder counts/metre and effective track width have been measured.
+  void updatePrediction(const IMU_Data &imu, uint32_t now_ms);
+  // Process a completed scan: match to the existing map, then map at corrected pose.
+  void processScan(LD06 &ld);
 
 private:
   MappingNav &m_nav;
   MotorControl &m_motors;
-  OpticalFlow &m_flow;
-
   int32_t prev_left_pulses = 0;
   int32_t prev_right_pulses = 0;
-  float prev_flow_x_mm = 0.0f;
-  float prev_flow_y_mm = 0.0f;
-  float prev_imu_heading_deg = 0.0f;
+  uint32_t last_update_ms = 0;
+  float last_left_delta_m = 0.0f;
+  float last_right_delta_m = 0.0f;
+  float last_encoder_dtheta_rad = 0.0f;
+  float last_imu_dtheta_rad = 0.0f;
+  float last_match_score = 0.0f;
+  bool last_match_accepted = false;
 
-  // Tunables (sane defaults, please adjust for your robot)
-  float pulses_per_meter = 1000.0f; // encoder pulses per linear metre
-  float wheel_base_m = 0.20f;       // distance between wheels
+  // Set these after physical calibration. Zero disables the corresponding
+  // encoder estimate; no guessed scale/track width is used by default.
+  static constexpr float IMU_HEADING_WEIGHT = 1.0f;
+  static constexpr float LIDAR_OFFSET_X_M = 0.10f;
+  static constexpr float LIDAR_OFFSET_Y_M = -0.04f;
+  static constexpr float LIDAR_YAW_OFFSET_RAD = 0.0f;
+  static constexpr uint16_t LIDAR_MATCH_MIN_POINTS = 24;
+  static constexpr float LIDAR_MATCH_MIN_SCORE = 300.0f;
+  static constexpr float LIDAR_MATCH_MIN_IMPROVEMENT = 80.0f;
+  static constexpr float LIDAR_MATCH_AMBIGUITY_MARGIN = 40.0f;
+  static constexpr float LIDAR_CORRECTION_MAX_M = 0.05f;
+  static constexpr float LIDAR_CORRECTION_MAX_RAD = 0.08726646f;
+
+  bool matchScan(LD06 &ld, float &dx, float &dy, float &dtheta,
+                 float &score);
+  float scorePose(LD06 &ld, const MappingNav::Pose2D &pose,
+                  uint16_t stride, uint16_t &tested);
 };
 
-#endif // ROBOSLAM_H_
+#endif

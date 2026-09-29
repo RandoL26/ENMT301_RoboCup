@@ -9,15 +9,15 @@
 #define PI_F 3.14159265358979f
 
 void ToFGeometry::getSensorWorldFrame(
-    const RobotPose &robot_pose,
+    const MappingNav::Pose2D &robot_pose,
     const ToFExtrinsics &tof_extrinsics,
     float &sensor_x_m,
     float &sensor_y_m,
     float &sensor_yaw_rad
 ) {
-    // Robot pose is in mm and rad
-    float robot_x_m = robot_pose.x_mm / 1000.0f;
-    float robot_y_m = robot_pose.y_mm / 1000.0f;
+    // MappingNav pose and ToF offsets are both expressed in metres.
+    float robot_x_m = robot_pose.x_m;
+    float robot_y_m = robot_pose.y_m;
     float robot_theta = robot_pose.theta_rad;
     
     // Sensor offset is relative to robot center, in robot frame

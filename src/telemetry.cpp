@@ -167,50 +167,52 @@ void telemetry_send_pose_and_path(const MappingNav &nav) {
 }
 
 void telemetry_send_localisation_debug(
-    float encoder_dx_m,
+    float encoder_left_delta_m,
+    float encoder_right_delta_m,
     float encoder_dtheta_rad,
-    float flow_dx_m,
-    float flow_dy_m,
     float imu_dtheta_rad,
-    float imu_heading_deg,
-    const MappingNav::Pose2D &pose) {
+    float lidar_match_score,
+    float lidar_correction_accepted,
+    const MappingNav::Pose2D &pose,
+    float lidar_dx_m, float lidar_dy_m, float lidar_dtheta_rad,
+    int32_t encoder_left_count, int32_t encoder_right_count) {
 
   // Payload:
   //
-  // encoder_dx_m       4 bytes
-  // encoder_dtheta    4 bytes
-  // flow_dx_m         4 bytes
-  // flow_dy_m         4 bytes
+  // encoder_left_delta_m  4 bytes
+  // encoder_right_delta_m 4 bytes
+  // encoder_dtheta_rad    4 bytes
   // imu_dtheta_rad    4 bytes
-  // imu_heading_deg   4 bytes
+  // lidar_match_score 4 bytes (0..1000)
+  // lidar_accepted    4 bytes (0 or 1)
   // pose_x_m          4 bytes
   // pose_y_m          4 bytes
   // pose_theta_rad    4 bytes
   //
-  // Total = 36 bytes
+  // 36-byte base remains compatible; appended correction and encoder counts = 56 bytes total.
 
-  const uint16_t payload_len = 36;
+  const uint16_t payload_len = 56;
 
   uint8_t payload[payload_len];
 
   uint8_t *ptr = payload;
 
-  memcpy(ptr, &encoder_dx_m, 4);
+  memcpy(ptr, &encoder_left_delta_m, 4);
+  ptr += 4;
+
+  memcpy(ptr, &encoder_right_delta_m, 4);
   ptr += 4;
 
   memcpy(ptr, &encoder_dtheta_rad, 4);
   ptr += 4;
 
-  memcpy(ptr, &flow_dx_m, 4);
-  ptr += 4;
-
-  memcpy(ptr, &flow_dy_m, 4);
-  ptr += 4;
-
   memcpy(ptr, &imu_dtheta_rad, 4);
   ptr += 4;
 
-  memcpy(ptr, &imu_heading_deg, 4);
+  memcpy(ptr, &lidar_match_score, 4);
+  ptr += 4;
+
+  memcpy(ptr, &lidar_correction_accepted, 4);
   ptr += 4;
 
   memcpy(ptr, &pose.x_m, 4);
@@ -220,6 +222,13 @@ void telemetry_send_localisation_debug(
   ptr += 4;
 
   memcpy(ptr, &pose.theta_rad, 4);
+  ptr += 4;
+
+  memcpy(ptr, &lidar_dx_m, 4); ptr += 4;
+  memcpy(ptr, &lidar_dy_m, 4); ptr += 4;
+  memcpy(ptr, &lidar_dtheta_rad, 4); ptr += 4;
+  memcpy(ptr, &encoder_left_count, 4); ptr += 4;
+  memcpy(ptr, &encoder_right_count, 4);
 
   send_frame(
       1,

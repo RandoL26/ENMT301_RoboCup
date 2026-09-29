@@ -45,7 +45,6 @@ public:
   static constexpr int8_t LIDAR_FAR_HIT_SCORE = 2;
 
     // Sensor fusion weights
-  static constexpr float ENCODER_TRANSLATION_WEIGHT = 0.5f;
   static constexpr float IMU_HEADING_WEIGHT = 0.8f;
 
   // Bit-packed cell format (1 byte/cell)
@@ -73,17 +72,15 @@ public:
     uint16_t y;
   };
 
-  // Per-cycle pose fusion input.
-  // Assumption: encoder/flow deltas are in robot body frame for this cycle.
+  // Per-cycle differential-drive odometry; distances are metres and angles radians.
   struct PoseUpdateInput {
-    float encoder_dx_m;
-    float encoder_dy_m;
+    float encoder_left_delta_m;
+    float encoder_right_delta_m;
     float encoder_dtheta_rad;
-
-    float flow_dx_m;
-    float flow_dy_m;
-
     float imu_gyro_dtheta_rad;
+    bool encoder_translation_valid;
+    bool encoder_heading_valid;
+    bool imu_heading_valid;
   };
 
   enum SensorKind : uint8_t {
@@ -114,14 +111,15 @@ public:
 
   void setPose(float x_m, float y_m, float theta_rad);
   Pose2D getPose() const;
+  float getPositionUncertaintyM() const;
+  float getHeadingUncertaintyRad() const;
 
-  // Complementary fusion of encoder + optical flow + IMU gyro heading delta.
-  void updatePose(
-    const PoseUpdateInput &input,
-    float translation_encoder_weight =
-        ENCODER_TRANSLATION_WEIGHT,
-    float heading_imu_weight =
-        IMU_HEADING_WEIGHT);
+  // Encoder distances provide translation; gyro and calibrated wheel geometry
+  // provide complementary heading. Optical flow is not part of localisation.
+  void updatePose(const PoseUpdateInput &input,
+                  float heading_imu_weight = IMU_HEADING_WEIGHT);
+  void applyPoseCorrection(float dx_m, float dy_m, float dtheta_rad);
+  bool isOccupiedWorld(float x_m, float y_m) const;
 
   // Occupancy update by ray-casting each reading.
   void updateGridFromSensors(const SensorRay *rays, uint16_t ray_count);
@@ -191,6 +189,9 @@ private:
 
   // Pose
   Pose2D m_pose;
+  // Qualitative dead-reckoning uncertainty, not a statistical covariance.
+  float m_position_uncertainty_m;
+  float m_heading_uncertainty_rad;
 
   // D* Lite state
   float m_g[NUM_CELLS];

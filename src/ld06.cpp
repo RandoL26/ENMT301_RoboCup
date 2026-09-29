@@ -499,7 +499,7 @@ void LD06::setOffsetPosition(int16_t xPos = 0, int16_t yPos = 0, float anglePos 
 bool LD06::isScanValid(DataPointHandler* scan) {
   if (!scan || scan->index < 100) {
     // Insufficient data for a meaningful scan
-    return false;
+    // return false;
   }
 
   if (scan->index < 2) return false;

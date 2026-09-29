@@ -147,14 +147,17 @@ class TelemetryState:
     lidar_diag: Optional[dict] = None
 
         # Localisation diagnostics
-    encoder_dx_m: float = 0.0
+    encoder_left_delta_m: float = 0.0
+    encoder_right_delta_m: float = 0.0
     encoder_dtheta_rad: float = 0.0
-
-    flow_dx_m: float = 0.0
-    flow_dy_m: float = 0.0
-
     imu_dtheta_rad: float = 0.0
-    imu_heading_deg: float = 0.0
+    lidar_match_score: float = 0.0
+    lidar_correction_accepted: bool = False
+    lidar_dx_m: float = 0.0
+    lidar_dy_m: float = 0.0
+    lidar_dtheta_rad: float = 0.0
+    encoder_left_count: int = 0
+    encoder_right_count: int = 0
 
 # ============================================================
 # TELEMETRY PACKET
@@ -777,16 +780,23 @@ class TelemetryReconstructor:
         )
 
         (
-            self.state.encoder_dx_m,
+            self.state.encoder_left_delta_m,
+            self.state.encoder_right_delta_m,
             self.state.encoder_dtheta_rad,
-            self.state.flow_dx_m,
-            self.state.flow_dy_m,
             self.state.imu_dtheta_rad,
-            self.state.imu_heading_deg,
+            self.state.lidar_match_score,
+            self.state.lidar_correction_accepted,
             _pose_x,
             _pose_y,
             _pose_theta,
         ) = values
+        self.state.lidar_correction_accepted = bool(
+            self.state.lidar_correction_accepted >= 0.5
+        )
+        if len(payload) >= 56:
+            (self.state.lidar_dx_m, self.state.lidar_dy_m,
+             self.state.lidar_dtheta_rad, self.state.encoder_left_count,
+             self.state.encoder_right_count) = struct.unpack("<3fii", payload[36:56])
 
         return True
 
@@ -1018,29 +1028,35 @@ class SerialWorker(threading.Thread):
             status_path_length=state.status_path_length,
             lidar_diag=(None if state.lidar_diag is None else dict(state.lidar_diag)),
 
-                        encoder_dx_m=(
-                state.encoder_dx_m
+                        encoder_left_delta_m=(
+                state.encoder_left_delta_m
+            ),
+
+            encoder_right_delta_m=(
+                state.encoder_right_delta_m
             ),
 
             encoder_dtheta_rad=(
                 state.encoder_dtheta_rad
             ),
 
-            flow_dx_m=(
-                state.flow_dx_m
-            ),
-
-            flow_dy_m=(
-                state.flow_dy_m
-            ),
-
             imu_dtheta_rad=(
                 state.imu_dtheta_rad
             ),
 
-            imu_heading_deg=(
-                state.imu_heading_deg
+            lidar_match_score=(
+                state.lidar_match_score
             ),
+
+            lidar_correction_accepted=(
+                state.lidar_correction_accepted
+            ),
+
+            lidar_dx_m=state.lidar_dx_m,
+            lidar_dy_m=state.lidar_dy_m,
+            lidar_dtheta_rad=state.lidar_dtheta_rad,
+            encoder_left_count=state.encoder_left_count,
+            encoder_right_count=state.encoder_right_count,
 
         )
 
@@ -1307,14 +1323,13 @@ class RoboCupVisualizer(QMainWindow):
 
         self.localisation_label = QLabel(
             "ENCODER:\n"
-            "  dX:      --\n"
+            "  counts:  -- / --\n"
+            "  left:    --\n"
+            "  right:   --\n"
             "  dTheta:  --\n"
-            "FLOW:\n"
-            "  dX:      --\n"
-            "  dY:      --\n"
             "IMU:\n"
             "  dTheta:  --\n"
-            "  Heading: --"
+            "LiDAR match: --"
         )
 
         self.localisation_label.setStyleSheet(
@@ -1876,14 +1891,13 @@ class RoboCupVisualizer(QMainWindow):
 
         self.localisation_label.setText(
             "ENCODER:\n"
-            "  dX:      --\n"
+            "  counts:  -- / --\n"
+            "  left:    --\n"
+            "  right:   --\n"
             "  dTheta:  --\n"
-            "FLOW:\n"
-            "  dX:      --\n"
-            "  dY:      --\n"
             "IMU:\n"
             "  dTheta:  --\n"
-            "  Heading: --"
+            "LiDAR match: --"
         )
 
         self.planner_label.setText(
@@ -2278,14 +2292,16 @@ class RoboCupVisualizer(QMainWindow):
 
         self.localisation_label.setText(
             f"ENCODER:\n"
-            f"  dX:      {state.encoder_dx_m * 1000:7.1f} mm\n"
+            f"  counts:  {state.encoder_left_count:8d} / {state.encoder_right_count:8d}\n"
+            f"  left:    {state.encoder_left_delta_m * 1000:7.1f} mm\n"
+            f"  right:   {state.encoder_right_delta_m * 1000:7.1f} mm\n"
             f"  dTheta:  {math.degrees(state.encoder_dtheta_rad):7.2f}°\n"
-            f"FLOW:\n"
-            f"  dX:      {state.flow_dx_m * 1000:7.1f} mm\n"
-            f"  dY:      {state.flow_dy_m * 1000:7.1f} mm\n"
             f"IMU:\n"
             f"  dTheta:  {math.degrees(state.imu_dtheta_rad):7.2f}°\n"
-            f"  Heading: {state.imu_heading_deg:7.2f}°"
+            f"LiDAR match: {state.lidar_match_score:5.0f}/1000 "
+            f"accepted={int(state.lidar_correction_accepted)}\n"
+            f"  corr:    {state.lidar_dx_m*1000:6.1f}, {state.lidar_dy_m*1000:6.1f} mm "
+            f"{math.degrees(state.lidar_dtheta_rad):5.2f}°"
         )
 
         # ----------------------------------------------------

@@ -44,7 +44,6 @@
 #include "ld06.h"                   // LD06 LiDAR
 #include "BigServo.h"               // Big servo
 #include "RoboSLAM.h"
-#include "Localisation.h"           // Sensor fusion localisation
 #include "POIDetector.h"             // ToF-based POI/weight detection
 #include "ToFCoverageMap.h"          // ToF coverage tracking
 #include "ToFSearchPlanner.h"        // Search target generation
@@ -57,6 +56,10 @@
 #ifndef TELEMETRY_ALLOW_ASCII_TELEPLOT
 #define TELEMETRY_ALLOW_ASCII_TELEPLOT 0
 #endif
+
+// Set to 1 temporarily to print PMW3901 readings on USB Serial.
+// This disables binary telemetry while enabled so text cannot corrupt the GUI stream.
+#define OPTICAL_FLOW_SERIAL_TEST 0
 
 
 //**********************************************************************************
@@ -92,8 +95,8 @@
 #define LD06_READ_TASK_PERIOD               1
 #define LD06_READ_TASK_NUM_EXECUTE          -1
 
-#define LOCALISATION_UPDATE_PERIOD          10
-#define LOCALISATION_UPDATE_NUM_EXECUTE     -1
+#define POSE_PREDICTION_PERIOD               10
+#define POSE_PREDICTION_NUM_EXECUTE          -1
 
 #define POI_DETECTOR_UPDATE_PERIOD          100  // 10 Hz: process ToF readings
 #define POI_DETECTOR_UPDATE_NUM_EXECUTE     -1
@@ -176,7 +179,7 @@ bool telemetry_imu_ok = false;
 bool telemetry_tof_ok = false;
 bool telemetry_optical_flow_ok = false;
 bool telemetry_ultrasonic_ok = false;
-bool binary_telemetry_active = false;
+bool binary_telemetry_active = OPTICAL_FLOW_SERIAL_TEST;
 
 
 bool robotStarted = false;
@@ -231,10 +234,7 @@ LD06 ld06(Serial2);
 
 // Mapping and on-board SLAM
 MappingNav mappingNav;
-RoboSLAM roboSlam(mappingNav, driveMotor, opticalFlow);
-
-// Sensor fusion localisation
-Localisation localisation;
+RoboSLAM roboSlam(mappingNav, driveMotor);
 
 // Ultrasonic Sensor instance (kept for backwards compatibility)
 // UltrasonicSensor ultrasonicSensor(ULTRASONIC_TRIGGER_PIN_1, ULTRASONIC_ECHO_PIN_1);
@@ -337,9 +337,16 @@ void optical_flow_callback(void) {
         float tx = opticalFlow.getTotalXmm();
         float ty = opticalFlow.getTotalYmm();
         optical_flow_update_count++;  // DIAGNOSTIC
+#if OPTICAL_FLOW_SERIAL_TEST
+        static uint32_t lastPrintMs = 0;
+        const uint32_t now = millis();
+        if (now - lastPrintMs >= 200) {
+            Serial.printf("X=%.2f mm, Y=%.2f mm\n", tx, ty);
+            lastPrintMs = now;
+        }
+#else
         printfBoth("OpticalFlow totalX: %.2f mm  totalY: %.2f mm\n", tx, ty);
-        // Update localisation with optical flow
-        localisation.updateOpticalFlow(opticalFlow);
+#endif
     }
 }
 
@@ -353,7 +360,7 @@ void ld06_lidar_callback(void) {
     }
     if (scanReady) {
         // Feed on-board RoboSLAM then also emit Teleplot for external tools if needed
-        roboSlam.processScan(ld06, current_imu_data);
+        roboSlam.processScan(ld06);
         
         // Diagnostic print: number of points available for telemetry
 
@@ -362,6 +369,7 @@ void ld06_lidar_callback(void) {
         scan_telemetry_call_count++;
         last_scan_point_count = ld06.getNbPointsInScan();
         telemetry_send_downsampled_scan(ld06, mappingNav, 48);
+
 #if TELEMETRY_ALLOW_ASCII_TELEPLOT
         Serial.print("TELEM SCAN POINTS=");
         Serial.println(ld06.getNbPointsInScan());
@@ -376,29 +384,9 @@ void lidar_front_test_callback(void) {
     targetDetector.debugPrintLidarFrontTest();
 }
 
-// Task wrapper for localisation sensor fusion update
-void localisation_update_callback(void) {
-    // Perform sensor fusion (prediction from IMU + flow)
-    localisation.updateFromSensors();
-    
-    // Optional: print diagnostics periodically (every 1000 ms)
-    static unsigned long last_diag_print = 0;
-    unsigned long now = millis();
-    if (now - last_diag_print >= 1000) {
-        last_diag_print = now;
-        
-        // Print fused localisation state
-        RobotPose pose = localisation.getPose();
-        LocalisationDiags diags = localisation.getDiags();
-        
-        printfBoth("LOCALISATION: x=%.1f mm, y=%.1f mm, theta=%.3f rad | "
-                   "flow: dx=%.1f, dy=%.1f | "
-                   "lidar_match=%u, accepted=%u, frames=%lu\n",
-                   pose.x_mm, pose.y_mm, pose.theta_rad,
-                   diags.flow_dx_mm, diags.flow_dy_mm,
-                   diags.lidar_match_score, diags.lidar_correction_accepted,
-                   diags.frame_count);
-    }
+// 100 Hz authoritative pose prediction task
+void pose_prediction_callback(void) {
+    roboSlam.updatePrediction(current_imu_data, millis());
 }
 
 // Task wrapper for VL53L1X sensor reading
@@ -484,12 +472,8 @@ void poi_detector_callback(void) {
         // Update ToF coverage map if reading is valid
         if (tof_distance_m > 0.0f) {
             const MappingNav::Pose2D navPose = mappingNav.getPose();
-            RobotPose pose;
-            pose.x_mm = navPose.x_m * 1000.0f;
-            pose.y_mm = navPose.y_m * 1000.0f;
-            pose.theta_rad = navPose.theta_rad;
             float sensor_x_m, sensor_y_m, sensor_yaw_rad;
-            ToFGeometry::getSensorWorldFrame(pose, tof_extrinsics,
+            ToFGeometry::getSensorWorldFrame(navPose, tof_extrinsics,
                                              sensor_x_m, sensor_y_m, sensor_yaw_rad);
             tofCoverageMap.markBeamCovered(sensor_x_m, sensor_y_m, sensor_yaw_rad, tof_distance_m);
         }
@@ -549,8 +533,6 @@ void ir_distance_sensor_callback(void) {
 // Task wrapper for IMU reading
 void imu_task_callback(void) {
     current_imu_data = read_imu();
-    // Update localisation with IMU data
-    localisation.updateIMU(current_imu_data);
     // Print tidy IMU headings (relative to startup) and accelerations
     float heading_rel = current_imu_data.euler_h - imu_heading_offset;
     // Normalize heading to [-180,180]
@@ -885,7 +867,7 @@ Task tIR_Distance_sensor(IR_DISTANCE_SENSOR_READ_PERIOD, IR_DISTANCE_SENSOR_NUM_
 Task tOpticalFlow(OF_READ_TASK_PERIOD, OF_READ_TASK_NUM_EXECUTE, &optical_flow_callback);
 Task tLD06_lidar(LD06_READ_TASK_PERIOD, LD06_READ_TASK_NUM_EXECUTE, &ld06_lidar_callback);
 Task tLidarFrontTest(500, -1, &lidar_front_test_callback); // Temporary pls remove
-Task tLocalisation(LOCALISATION_UPDATE_PERIOD, LOCALISATION_UPDATE_NUM_EXECUTE, &localisation_update_callback);
+Task tPosePrediction(POSE_PREDICTION_PERIOD, POSE_PREDICTION_NUM_EXECUTE, &pose_prediction_callback);
 Task tPOI_Detector(POI_DETECTOR_UPDATE_PERIOD, POI_DETECTOR_UPDATE_NUM_EXECUTE, &poi_detector_callback);
 Task tToF_SearchPlanner(TOF_SEARCH_PLANNER_PERIOD, TOF_SEARCH_PLANNER_NUM_EXECUTE, &tof_search_planner_callback);
 Task tSensor_average(SENSOR_AVERAGE_PERIOD,      SENSOR_AVERAGE_NUM_EXECUTE,      &sensor_average);
@@ -972,11 +954,6 @@ void setRobotStartPosition()
             START_LEFT_THETA_RAD
         );
 
-        localisation.resetPose(
-            START_LEFT_X_M * 1000.0f,
-            START_LEFT_Y_M * 1000.0f,
-            START_LEFT_THETA_RAD
-        );
     }
     else
     {
@@ -986,11 +963,6 @@ void setRobotStartPosition()
             START_RIGHT_THETA_RAD
         );
 
-        localisation.resetPose(
-            START_RIGHT_X_M * 1000.0f,
-            START_RIGHT_Y_M * 1000.0f,
-            START_RIGHT_THETA_RAD
-        );
     }
 }
 
@@ -1148,6 +1120,7 @@ void robot_init() {
     } else {
 
     telemetry_optical_flow_ok = true;
+    opticalFlow.setLed(true);
 
     printlnBoth(
         "Optical Flow initialized"
@@ -1261,8 +1234,6 @@ void robot_init() {
         driveMotor.begin();
         // Initialize RoboSLAM baseline (read initial encoder/flow/imu state)
         roboSlam.begin();
-        // Initialize sensor fusion localisation
-        localisation.begin();
         setRobotStartPosition();
         
         // Initialize POI detection system
@@ -1275,9 +1246,11 @@ void robot_init() {
         tofCoverageMap.begin();
         searchPlanner.begin();
         
-        // Initialize telemetry over USB Serial
+        // Initialize telemetry over USB Serial unless running a text-only sensor test.
+#if !OPTICAL_FLOW_SERIAL_TEST
         telemetry_init(Serial);
         binary_telemetry_active = true;
+#endif
         
         printlnBoth("Robot is ready \n");
     } else {
@@ -1302,49 +1275,51 @@ void task_init() {
   // Register each active task before enabling it. The ultrasonic task stays
   // disabled until its pins and begin() calls are configured in robot_init().
 //   taskManager.addTask(tRead_ultrasonic);
-taskManager.addTask(tProximity_sensor);
+// taskManager.addTask(tProximity_sensor);
 //   taskManager.addTask(tRead_infrared);
 //   taskManager.addTask(tRead_colour);
-//   taskManager.addTask(tRead_imu);
+  taskManager.addTask(tRead_imu);
 //   taskManager.addTask(tVL53L1X_sensor);
 //   taskManager.addTask(tIR_Distance_sensor);
 //   taskManager.addTask(tSensor_average);
-//   taskManager.addTask(tDC_motor);
+  taskManager.addTask(tDC_motor);
 //   taskManager.addTask(tWeight_scan);
  // taskManager.addTask(tCollect_weight);
 //   taskManager.addTask(tReturn_to_base);
 //   taskManager.addTask(tDetect_base);
 //   taskManager.addTask(tUnload_weights);
 //   taskManager.addTask(tBT_stream_test);
-//   taskManager.addTask(tOpticalFlow);
-//   taskManager.addTask(tLD06_lidar);
-//   taskManager.addTask(tLocalisation);
-//   taskManager.addTask(tLidarFrontTest);
-//   taskManager.addTask(tPOI_Detector);
-//   taskManager.addTask(tToF_SearchPlanner);
-taskManager.addTask(tBig_Servo);
+  taskManager.addTask(tOpticalFlow);
+  taskManager.addTask(tLD06_lidar);
+  taskManager.addTask(tPosePrediction);
+#if !OPTICAL_FLOW_SERIAL_TEST
+  taskManager.addTask(tLidarFrontTest);
+#endif
+  taskManager.addTask(tPOI_Detector);
+  taskManager.addTask(tToF_SearchPlanner);
+// taskManager.addTask(tBig_Servo);
 //   tRead_ultrasonic.enable();
 //   tRead_infrared.enable();
 //   tRead_colour.enable();
-//   tRead_imu.enable();
+  tRead_imu.enable();
 //   tVL53L1X_sensor.enable();
 //   tIR_Distance_sensor.enable();
 //   tSensor_average.enable();
-//   tDC_motor.enable();
+  tDC_motor.enable();
 //   tWeight_scan.enable();
   //tCollect_weight.enable();
 //   tReturn_to_base.enable();
 //   tDetect_base.enable();
 //   tUnload_weights.enable();
 //   tBT_stream_test.enable();
-//   tOpticalFlow.enable();
-//   tLD06_lidar.enable();
-//   tLidarFrontTest.enable();
-//   tLocalisation.enable();
-//   tPOI_Detector.enable();
-//   tToF_SearchPlanner.enable();
-tBig_Servo.enable();
-tProximity_sensor.enable();
+  tOpticalFlow.enable();
+  tLD06_lidar.enable();
+  tLidarFrontTest.enable();
+  tPosePrediction.enable();
+  tPOI_Detector.enable();
+  tToF_SearchPlanner.enable();
+// tBig_Servo.enable();
+// tProximity_sensor.enable();
  printlnBoth("Tasks have been initialised \n");
 }
 
@@ -1411,6 +1386,7 @@ void loop() {
 
     unsigned long now = millis();
 
+#if !OPTICAL_FLOW_SERIAL_TEST
     if (now - last_status_ms >= 200) {
         send_robot_status_telemetry();
         last_status_ms = now;
@@ -1436,5 +1412,6 @@ void loop() {
         telemetry_send_inflated_grid(mappingNav);
         last_inflated_grid_ms = now;
     }
+#endif
 }
 

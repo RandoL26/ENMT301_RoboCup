@@ -12,6 +12,7 @@ struct IMU_Data {
   float mag_x, mag_y, mag_z;          // Magnetic field (μT)
   float euler_h, euler_r, euler_p;    // Euler angles: heading, roll, pitch (degrees)
   float temp;                         // Temperature (°C)
+  bool gyro_valid;                    // True only when the most recent gyro read succeeded
 };
 
 // Read ultrasonic value
