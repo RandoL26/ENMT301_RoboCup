@@ -245,15 +245,33 @@ bool TieredTargetDetector::update() {
     bool farCandidate = debug.farPairMatch;
     bool nearCandidate = debug.nearPairMatch;
 
-    bool currentCandidate =
+    bool tofCandidate =
         farCandidate || nearCandidate;
+
+    // A ToF pair match alone is NOT enough to start target tracking.
+    // The LiDAR must see a separate physical object as well.
+    bool separateLidarObstacle = false;
+
+    if (tofCandidate) {
+        const GridPoint& tofCandidatePoint =
+            nearCandidate ? nearTierPoint : farTierPoint;
+
+        separateLidarObstacle =
+            hasSeparateLidarObstacle(tofCandidatePoint);
+    }
+
+    bool targetCandidate =
+        tofCandidate &&
+        separateLidarObstacle &&
+        !anyObstacle;
+
+    bool currentCandidate = targetCandidate;
 
     GridPoint currentCandidatePoint;
 
-    if (nearCandidate) {
-        currentCandidatePoint = nearTierPoint;
-    } else if (farCandidate) {
-        currentCandidatePoint = farTierPoint;
+    if (targetCandidate) {
+        currentCandidatePoint =
+            nearCandidate ? nearTierPoint : farTierPoint;
     }
 
     uint32_t now = millis();
@@ -350,7 +368,19 @@ bool TieredTargetDetector::update() {
     }
 
     // ============================================================
-    // 11. STATE MACHINE
+    // 11. SAME-OBJECT OBSTACLE OVERRIDES TARGET TRACKING
+    // ============================================================
+
+    if (anyObstacle) {
+        targetConfidence = 0;
+        targetLatched = false;
+        movingObjectDetected = false;
+        trackingState = TargetTrackingState::NONE;
+        lastCandidatePoint = GridPoint{};
+    }
+
+    // ============================================================
+    // 12. STATE MACHINE
     // ============================================================
 
     switch (trackingState) {
@@ -689,7 +719,7 @@ bool TieredTargetDetector::update() {
     }
 
     // ============================================================
-    // 12. UPDATE RESULT
+    // 13. UPDATE RESULT
     // ============================================================
 
     if (trackingState ==
@@ -721,7 +751,7 @@ bool TieredTargetDetector::update() {
     }
 
     // ============================================================
-    // 13. DEBUG
+    // 14. DEBUG
     // ============================================================
 
     debug.targetConfidence = targetConfidence;
@@ -957,6 +987,123 @@ bool TieredTargetDetector::isObstacleAgainstLidar(const GridPoint& tofPoint) con
     }
 
     return fabsf(lidarDist - tofDist) <= float(config.lidarMatchToleranceMm);
+}
+
+bool TieredTargetDetector::hasSeparateLidarObstacle(const GridPoint& tofPoint) const {
+
+    if (!tofPoint.valid) {
+        return false;
+    }
+
+    const uint16_t n = lidar.getNbPointsInScan();
+
+    for (uint16_t i = 0; i < n; ++i) {
+
+        DataPoint* anchorPoint = lidar.getPoints(i);
+
+        if (anchorPoint == nullptr ||
+            anchorPoint->distance < config.lidarObstacleMinMm ||
+            anchorPoint->distance > config.lidarObstacleMaxMm) {
+            continue;
+        }
+
+        GridPoint anchor = lidarPointToRobotGrid(*anchorPoint);
+
+        if (!anchor.valid) {
+            continue;
+        }
+
+        if (config.useSeparateObstacleAngleGate) {
+            const float bearing = anchor.bearingFromOriginDeg();
+            const float lo = config.separateObstacleAngleMinDeg;
+            const float hi = config.separateObstacleAngleMaxDeg;
+
+            const bool inside = (lo <= hi)
+                ? (bearing >= lo && bearing <= hi)
+                : (bearing >= lo || bearing <= hi);
+
+            if (!inside) {
+                continue;
+            }
+        }
+
+        // The anchor itself must be physically separated from the ToF POI.
+        const float anchorDx = anchor.x - tofPoint.x;
+        const float anchorDy = anchor.y - tofPoint.y;
+        const float anchorSeparation =
+            sqrtf(anchorDx * anchorDx + anchorDy * anchorDy);
+
+        if (anchorSeparation < float(config.separateObstacleDistanceMm)) {
+            continue;
+        }
+
+        // Count nearby LiDAR returns around this anchor. The anchor counts
+        // as point 1, so we need at least two more returns to form the
+        // required 3-point obstacle cluster.
+        uint8_t clusterCount = 1;
+
+        for (uint16_t j = 0; j < n; ++j) {
+
+            if (j == i) {
+                continue;
+            }
+
+            DataPoint* candidatePoint = lidar.getPoints(j);
+
+            if (candidatePoint == nullptr ||
+                candidatePoint->distance < config.lidarObstacleMinMm ||
+                candidatePoint->distance > config.lidarObstacleMaxMm) {
+                continue;
+            }
+
+            GridPoint candidate = lidarPointToRobotGrid(*candidatePoint);
+
+            if (!candidate.valid) {
+                continue;
+            }
+
+            if (config.useSeparateObstacleAngleGate) {
+                const float bearing = candidate.bearingFromOriginDeg();
+                const float lo = config.separateObstacleAngleMinDeg;
+                const float hi = config.separateObstacleAngleMaxDeg;
+
+                const bool inside = (lo <= hi)
+                    ? (bearing >= lo && bearing <= hi)
+                    : (bearing >= lo || bearing <= hi);
+
+                if (!inside) {
+                    continue;
+                }
+            }
+
+            // Every point in the cluster must also be separated from the
+            // ToF POI. This prevents a large object containing the ToF hit
+            // from being mistaken for a separate obstacle.
+            const float dxToTof = candidate.x - tofPoint.x;
+            const float dyToTof = candidate.y - tofPoint.y;
+            const float separationFromTof =
+                sqrtf(dxToTof * dxToTof + dyToTof * dyToTof);
+
+            if (separationFromTof < float(config.separateObstacleDistanceMm)) {
+                continue;
+            }
+
+            const float dx = candidate.x - anchor.x;
+            const float dy = candidate.y - anchor.y;
+            const float clusterDistance =
+                sqrtf(dx * dx + dy * dy);
+
+            if (clusterDistance <= float(config.lidarClusterRadiusMm)) {
+                ++clusterCount;
+
+                if (clusterCount >= config.minimumSeparateLidarPoints) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    return false;
 }
 
 bool TieredTargetDetector::findNearestLidarAtBearing(float bearingDeg, float toleranceDeg, float& outDistanceMm) const {
