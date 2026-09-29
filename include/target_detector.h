@@ -71,7 +71,24 @@ struct TieredTargetDetectorConfig {
     // --- TOF <-> lidar comparison (replaces the old top-sensor fields) ---
     uint16_t maxDetectionRangeMm = 700;    // hard cap: ignore TOF readings beyond this
     uint16_t lidarMatchToleranceMm = 60;   // |tofDist - lidarDist| <= this => same surface => Obstacle
-    float lidarBearingToleranceDeg = 1.0f; // matching window for the lidar lookup at a given bearing
+    float lidarBearingToleranceDeg = 1.0f;
+
+    // --- Separate LiDAR obstacle ---
+    // A target candidate requires the LiDAR to see a different physical
+    // object from the ToF POI. The separate object must contain at least
+    // this many nearby LiDAR returns.
+    uint16_t lidarObstacleMinMm = 80;
+    uint16_t lidarObstacleMaxMm = 700;
+    uint8_t minimumSeparateLidarPoints = 3;
+    uint16_t separateObstacleDistanceMm = 100;
+    uint16_t lidarClusterRadiusMm = 80;
+
+    // Only the separate-obstacle test uses this gate. Keeping it separate
+    // from useAngleGate means the existing ToF <-> LiDAR same-object test
+    // does not change behaviour unexpectedly.
+    bool useSeparateObstacleAngleGate = true;
+    float separateObstacleAngleMinDeg = -90.0f;
+    float separateObstacleAngleMaxDeg = 90.0f; // matching window for the lidar lookup at a given bearing
                                             // (LD06 does 4500 samples/sec over 360 deg, so this can
                                             // stay tight -- widen it if real-world returns are sparse)
 
@@ -200,6 +217,7 @@ private:
     GridPoint lidarPointToRobotGrid(const DataPoint& point) const;
 
     bool isObstacleAgainstLidar(const GridPoint& tofPoint) const;
+    bool hasSeparateLidarObstacle(const GridPoint& tofPoint) const;
     bool findNearestLidarAtBearing(float bearingDeg, float toleranceDeg, float& outDistanceMm) const;
     float computeSteering(const GridPoint& hit, const SensorMount& mountA, const SensorMount& mountB) const;
 
