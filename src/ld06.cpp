@@ -126,6 +126,7 @@ static void analyzePreviousScan(DataPointHandler *scan) {
   float last_angle = scan->points[n-1].angle;
   float min_angle = first_angle;
   float max_angle = first_angle;
+  uint16_t pos_count = 0;
   uint16_t neg_count = 0;
   uint16_t large_pos_count = 0;
   float largest_pos = 0.0f;
@@ -141,22 +142,22 @@ static void analyzePreviousScan(DataPointHandler *scan) {
     if (i > 0) {
       float prev = scan->points[i-1].angle;
       float step = a - prev;
-      if (step <= -360.0f) step += 360.0f;
-      if (step > 360.0f) step -= 360.0f;
+      if (step > 180.0f) step -= 360.0f;
+      else if (step < -180.0f) step += 360.0f;
       if (step < 0.0f) {
         ++neg_count;
         if (ld06_diag_first_neg_step_idx == 0xFFFF) ld06_diag_first_neg_step_idx = i;
         float negmag = -step;
         if (negmag > largest_neg) largest_neg = negmag;
       } else {
+        if (step > 0.0f) ++pos_count;
         if (step > largest_pos) largest_pos = step;
-        if (step > 10.0f) {
-          ++large_pos_count;
-          if (ld06_diag_first_large_jump_idx == 0xFFFF) ld06_diag_first_large_jump_idx = i;
-        }
       }
-      float forward_step = step >= 0.0f ? step : (step + 360.0f);
-      total_span += forward_step;
+      if (fabsf(step) > 10.0f) {
+        ++large_pos_count;
+        if (ld06_diag_first_large_jump_idx == 0xFFFF) ld06_diag_first_large_jump_idx = i;
+      }
+      total_span += fabsf(step);
     }
   }
 
@@ -164,7 +165,7 @@ static void analyzePreviousScan(DataPointHandler *scan) {
   ld06_diag_last_angle_cdeg = (uint16_t)fminf(0xFFFF, roundf(last_angle * 100.0f));
   ld06_diag_min_angle_cdeg = (uint16_t)fminf(0xFFFF, roundf(min_angle * 100.0f));
   ld06_diag_max_angle_cdeg = (uint16_t)fminf(0xFFFF, roundf(max_angle * 100.0f));
-  ld06_diag_neg_steps_count = neg_count;
+  ld06_diag_neg_steps_count = (neg_count < pos_count) ? neg_count : pos_count;
   ld06_diag_large_pos_jumps_count = large_pos_count;
   ld06_diag_largest_pos_step_cdeg = (uint16_t)fminf(0xFFFF, roundf(largest_pos * 100.0f));
   ld06_diag_largest_neg_step_cdeg = (uint16_t)fminf(0xFFFF, roundf(largest_neg * 100.0f));
@@ -208,38 +209,32 @@ bool LD06::readData() {
 bool LD06::readDataCRC() {
   // Strict sync parser: validate frame structure and CRC before processing.
   uint8_t pkt[LD06_PACKET_SIZE];
-  while (ld06_read_packet_strict(_lidarSerial, pkt)) {
-    if (!ld06_packet_crc_valid(pkt)) {
-      ++_checksumFailCount;
-      continue;
-    }
-    if (!ld06_packet_structurally_valid(pkt)) {
-      continue;  // discard invalid packet and keep scanning
-    }
-
-    memcpy(_receivedData.packet.bytes, pkt, LD06_PACKET_SIZE);
-    computeData();
-    #if LD06_DEBUG_ASCII
-    Serial.printf("LD06: packet processed start=%.2f\n", (float)_receivedData.packet.startAngle / 100.0f);
-    #endif
-    return true;
+  if (!ld06_read_packet_strict(_lidarSerial, pkt)) return false;
+  if (!ld06_packet_crc_valid(pkt)) {
+    ++_checksumFailCount;
+    return true;  // A frame was consumed; the bounded readScan loop can continue.
   }
-  return false;
+  if (!ld06_packet_structurally_valid(pkt)) {
+    return true;  // Discard this frame and allow readScan to drain another.
+  }
+
+  memcpy(_receivedData.packet.bytes, pkt, LD06_PACKET_SIZE);
+  computeData();
+#if LD06_DEBUG_ASCII
+  Serial.printf("LD06: packet processed start=%.2f\n", (float)_receivedData.packet.startAngle / 100.0f);
+#endif
+  return true;
 }
 
 bool LD06::readDataNoCRC() {
   // Same strict framing and structural validation, but no CRC rejection.
   uint8_t pkt[LD06_PACKET_SIZE];
-  while (ld06_read_packet_strict(_lidarSerial, pkt)) {
-    if (!ld06_packet_structurally_valid(pkt)) {
-      continue;  // discard invalid packet and keep scanning
-    }
+  if (!ld06_read_packet_strict(_lidarSerial, pkt)) return false;
+  if (!ld06_packet_structurally_valid(pkt)) return true;
 
-    memcpy(_receivedData.packet.bytes, pkt, LD06_PACKET_SIZE);
-    computeData();
-    return true;
-  }
-  return false;
+  memcpy(_receivedData.packet.bytes, pkt, LD06_PACKET_SIZE);
+  computeData();
+  return true;
 }
 
 bool LD06::readScan() {
@@ -248,10 +243,15 @@ bool LD06::readScan() {
   // consume incoming bytes via readData/readDataCRC and report the new-scan
   // flag if set.
   _newScan = false;
-  (void)readData();
-  if (_scanReadyLatched) {
-    _scanReadyLatched = false;
-    return true;
+  // Consume at most eight complete frames per scheduler callback. The prior
+  // implementation drained the entire UART queue in readData(), which could
+  // starve other tasks when callbacks fell behind.
+  for (uint8_t i = 0; i < 8; ++i) {
+    if (!readData()) break;
+    if (_scanReadyLatched) {
+      _scanReadyLatched = false;
+      return true;
+    }
   }
   return false;
 }
@@ -502,48 +502,39 @@ bool LD06::isScanValid(DataPointHandler* scan) {
     return false;
   }
 
-  // Calculate angular span
   if (scan->index < 2) return false;
-  
-  float firstAngle = scan->points[0].angle;
-  float lastAngle = scan->points[scan->index - 1].angle;
-  
-  // Handle wrap-around: if first angle > last angle, we've wrapped 0°
-  float angularSpan;
-  if (lastAngle >= firstAngle) {
-    angularSpan = lastAngle - firstAngle;
-  } else {
-    angularSpan = (360.0f - firstAngle) + lastAngle; // Wrap-around case
-  }
-  
-  // A valid revolution should span 300-380 degrees
-  // Lower bound catches incomplete scans; upper bound catches duplicates
-  if (angularSpan < 300.0f || angularSpan > 380.0f) {
-    ld06_diag_last_angular_span = angularSpan;
-    return false;
-  }
 
-  // Count backward angle steps (indicates packet reordering or data corruption)
-  uint16_t backwardStepCount = 0;
+  // Sum shortest circular steps. The LD06 may report a scan in either angular
+  // direction, so endpoint subtraction alone can mistake a full turn for a
+  // tiny span when the start and end fall on opposite sides of 0 degrees.
+  float angularTravel = 0.0f;
+  uint16_t positiveSteps = 0;
+  uint16_t negativeSteps = 0;
   for (uint16_t i = 1; i < scan->index; i++) {
-    float prevAngle = scan->points[i-1].angle;
-    float currAngle = scan->points[i].angle;
-    
-    // Allow one wrap-around per scan (0° transition); count others as anomalies
-    if (currAngle < prevAngle && (prevAngle - currAngle) < 300.0f) {
-      backwardStepCount++;
+    float step = scan->points[i].angle - scan->points[i - 1].angle;
+    if (step > 180.0f) step -= 360.0f;
+    else if (step < -180.0f) step += 360.0f;
+
+    angularTravel += fabsf(step);
+    if (step > 0.02f) {
+      ++positiveSteps;
+    } else if (step < -0.02f) {
+      ++negativeSteps;
     }
   }
-  
-  // More than a few backward steps indicates corruption
-  if (backwardStepCount > 3) {
-    ld06_diag_backward_angle_count = backwardStepCount;
+
+  ld06_diag_last_angular_span = angularTravel;
+  const uint16_t directionAnomalies =
+      (positiveSteps < negativeSteps) ? positiveSteps : negativeSteps;
+
+  // A complete scan should travel about one revolution and have a consistent
+  // direction, allowing a few reordered or noisy points.
+  if (angularTravel < 300.0f || angularTravel > 380.0f || directionAnomalies > 3) {
+    ld06_diag_backward_angle_count = directionAnomalies;
     return false;
   }
 
-  // Scan appears valid
-  ld06_diag_backward_angle_count = backwardStepCount;
-  ld06_diag_last_angular_span = angularSpan;
+  ld06_diag_backward_angle_count = directionAnomalies;
   return true;
 }
 

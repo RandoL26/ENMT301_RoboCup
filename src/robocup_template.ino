@@ -355,9 +355,6 @@ void ld06_lidar_callback(void) {
         // Feed on-board RoboSLAM then also emit Teleplot for external tools if needed
         roboSlam.processScan(ld06, current_imu_data);
         
-        // Also feed LiDAR scan to sensor fusion localisation for pose correction
-        localisation.correctFromLiDAR(ld06, mappingNav);
-        
         // Diagnostic print: number of points available for telemetry
 
         // Emit a downsampled scan for the visualizer (non-blocking, small)
@@ -482,11 +479,15 @@ void poi_detector_callback(void) {
         float tof_distance_m = (tofData.sensorCount > 0) ? (tofData.distances[0] / 1000.0f) : 0.0f;
         
         // Update POI detector with fused pose and occupancy map
-        poiDetector.update(localisation, mappingNav, tof_distance_m);
+        poiDetector.update(mappingNav, tof_distance_m);
         
         // Update ToF coverage map if reading is valid
         if (tof_distance_m > 0.0f) {
-            RobotPose pose = localisation.getPose();
+            const MappingNav::Pose2D navPose = mappingNav.getPose();
+            RobotPose pose;
+            pose.x_mm = navPose.x_m * 1000.0f;
+            pose.y_mm = navPose.y_m * 1000.0f;
+            pose.theta_rad = navPose.theta_rad;
             float sensor_x_m, sensor_y_m, sensor_yaw_rad;
             ToFGeometry::getSensorWorldFrame(pose, tof_extrinsics,
                                              sensor_x_m, sensor_y_m, sensor_yaw_rad);
@@ -503,16 +504,11 @@ void tof_search_planner_callback(void) {
         return;
     }
     
-    // Generate candidate poses using authoritative fused pose
+    // Generate candidate poses from MappingNav, the authoritative pose.
     const uint16_t MAX_CANDIDATES = 30;
     SearchCandidate candidates[MAX_CANDIDATES];
     
-    // Use fused Localisation pose, not MappingNav's separate pose
-    RobotPose fused_pose = localisation.getPose();
-    MappingNav::Pose2D current_pose;
-    current_pose.x_m = fused_pose.x_mm / 1000.0f;
-    current_pose.y_m = fused_pose.y_mm / 1000.0f;
-    current_pose.theta_rad = fused_pose.theta_rad;
+    MappingNav::Pose2D current_pose = mappingNav.getPose();
     
     uint16_t candidate_count = searchPlanner.generateCandidates(
         current_pose, tofCoverageMap, mappingNav, candidates, MAX_CANDIDATES);
@@ -526,9 +522,6 @@ void tof_search_planner_callback(void) {
     
     // Extract best candidate pose
     SearchCandidate &best = candidates[best_idx];
-    
-    // Synchronize MappingNav's internal pose with fused pose before pathfinding
-    mappingNav.setPose(current_pose.x_m, current_pose.y_m, current_pose.theta_rad);
     
     // Issue navigation goal to D* Lite pathfinder
     bool goal_set = mappingNav.setGoalWorld(best.x_m, best.y_m);

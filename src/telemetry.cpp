@@ -432,7 +432,14 @@ void telemetry_update_ld06_diagnostics(struct DataPointHandler *scan) {
   float ang_diff_sq_sum = 0.0f;
   uint16_t ang_diff_n = 0;
   const float RAD_TO_DEG_F = 180.0f / PI;
-  if (g_prev_scan_nb > 0) {
+  // The nearest-angle comparison is O(n^2). Keep the diagnostic data but run
+  // this expensive comparison on every fourth scan; other per-scan range and
+  // quality counters below remain current for every completed scan.
+  static uint8_t angle_match_divider = 0;
+  ++angle_match_divider;
+  if (angle_match_divider >= 4) angle_match_divider = 0;
+  const bool update_angle_match = (angle_match_divider == 0);
+  if (g_prev_scan_nb > 0 && update_angle_match) {
     for (uint16_t i = 0; i < nb; ++i) {
       uint32_t curr_mm = (uint32_t)(dists[i] * 1000.0f + 0.5f);
       if (curr_mm == 0) continue;
@@ -455,22 +462,36 @@ void telemetry_update_ld06_diagnostics(struct DataPointHandler *scan) {
     }
   }
 
-  // Store results into telemetry globals (capped appropriately)
-  g_ld_matched_count = (uint16_t)matched_count;
-  uint32_t max_delta_mm_u32 = (uint32_t)(max_delta_m * 1000.0f + 0.5f);
-  if (max_delta_mm_u32 > 0xFFFF) max_delta_mm_u32 = 0xFFFF;
-  g_ld_max_delta_mm = (uint16_t)max_delta_mm_u32;
-  g_ld_count_delta_gt_100 = cnt_gt_100; g_ld_count_delta_gt_500 = cnt_gt_500; g_ld_count_delta_gt_1000 = cnt_gt_1000;
-  float angle_deg = fmodf((angle_of_max_delta_rad * RAD_TO_DEG_F) + 360.0f, 360.0f);
-  uint32_t angle_cdeg = (uint32_t)(angle_deg * 100.0f + 0.5f); if (angle_cdeg > 0xFFFF) angle_cdeg = 0xFFFF;
-  g_ld_angle_of_max_delta_cdeg = (uint16_t)angle_cdeg;
-  if (ang_diff_n > 0) {
-    float mean = ang_diff_sum / (float)ang_diff_n; float var = (ang_diff_sq_sum / (float)ang_diff_n) - (mean * mean);
-    if (var < 0.0f) var = 0.0f; float std = sqrtf(var);
-    uint32_t mean_cdeg = (uint32_t)(mean * 100.0f + 0.5f); uint32_t std_cdeg = (uint32_t)(std * 100.0f + 0.5f);
-    if (mean_cdeg > 0xFFFF) mean_cdeg = 0xFFFF; if (std_cdeg > 0xFFFF) std_cdeg = 0xFFFF;
-    g_ld_angle_diff_mean_cdeg = (uint16_t)mean_cdeg; g_ld_angle_diff_std_cdeg = (uint16_t)std_cdeg;
-  } else { g_ld_angle_diff_mean_cdeg = 0; g_ld_angle_diff_std_cdeg = 0; }
+  // Store results when a comparison was performed; otherwise retain the most
+  // recent angle-match snapshot. Packet 0x06 remains byte-for-byte compatible.
+  if (g_prev_scan_nb > 0 && update_angle_match) {
+    g_ld_matched_count = (uint16_t)matched_count;
+    uint32_t max_delta_mm_u32 = (uint32_t)(max_delta_m * 1000.0f + 0.5f);
+    if (max_delta_mm_u32 > 0xFFFF) max_delta_mm_u32 = 0xFFFF;
+    g_ld_max_delta_mm = (uint16_t)max_delta_mm_u32;
+    g_ld_count_delta_gt_100 = cnt_gt_100;
+    g_ld_count_delta_gt_500 = cnt_gt_500;
+    g_ld_count_delta_gt_1000 = cnt_gt_1000;
+    float angle_deg = fmodf((angle_of_max_delta_rad * RAD_TO_DEG_F) + 360.0f, 360.0f);
+    uint32_t angle_cdeg = (uint32_t)(angle_deg * 100.0f + 0.5f);
+    if (angle_cdeg > 0xFFFF) angle_cdeg = 0xFFFF;
+    g_ld_angle_of_max_delta_cdeg = (uint16_t)angle_cdeg;
+    if (ang_diff_n > 0) {
+      float mean = ang_diff_sum / (float)ang_diff_n;
+      float var = (ang_diff_sq_sum / (float)ang_diff_n) - (mean * mean);
+      if (var < 0.0f) var = 0.0f;
+      float std = sqrtf(var);
+      uint32_t mean_cdeg = (uint32_t)(mean * 100.0f + 0.5f);
+      uint32_t std_cdeg = (uint32_t)(std * 100.0f + 0.5f);
+      if (mean_cdeg > 0xFFFF) mean_cdeg = 0xFFFF;
+      if (std_cdeg > 0xFFFF) std_cdeg = 0xFFFF;
+      g_ld_angle_diff_mean_cdeg = (uint16_t)mean_cdeg;
+      g_ld_angle_diff_std_cdeg = (uint16_t)std_cdeg;
+    } else {
+      g_ld_angle_diff_mean_cdeg = 0;
+      g_ld_angle_diff_std_cdeg = 0;
+    }
+  }
 
   // Save current scan distances/angles for next comparison
   for (uint16_t i = 0; i < nb && i < LD06_MAX_PTS_SCAN; ++i) {
