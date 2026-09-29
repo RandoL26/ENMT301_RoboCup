@@ -83,7 +83,7 @@
 #define VL53L1X_SENSOR_READ_PERIOD          100
 #define IR_DISTANCE_SENSOR_READ_PERIOD      50
 #define DC_MOTOR_CONTROL_PERIOD             40
-#define BIG_SERVO_PERIOD                    1000
+#define BIG_SERVO_PERIOD                    100
 
 
 #define OF_READ_TASK_PERIOD                 40
@@ -176,6 +176,7 @@ bool telemetry_imu_ok = false;
 bool telemetry_tof_ok = false;
 bool telemetry_optical_flow_ok = false;
 bool telemetry_ultrasonic_ok = false;
+
 
 
 bool robotStarted = false;
@@ -845,15 +846,25 @@ void handle_motor_line(const char* line, Print* ackPort) {
     }
 }
 
-int angle = 0;
+
+int collect_time = 0;
 void big_servo_callback() {
     if (!(proximitySensor.isObjectDetected())){
-        collect_weight();
+        if (!pickingUp) {
+            pickingUp = true;
+        }
         
-    } else {
-        digitalWrite(ELECTROMAGNET_PIN, HIGH);
-        bigServo_move(169);
     }
+    if (pickingUp) {
+        collect_time++;
+
+        collect_weight(collect_time);
+        if (collect_time >= 70) {
+            pickingUp = false;
+            collect_time = 0;
+        }
+    }
+    printBoth("collect_time: ");
     
 }
 //**********************************************************************************
@@ -890,7 +901,7 @@ Task tSet_motor(SET_MOTOR_TASK_PERIOD,           SET_MOTOR_TASK_NUM_EXECUTE,    
 
 // Tasks to scan for weights and collection upon detection
 Task tWeight_scan(WEIGHT_SCAN_TASK_PERIOD,       WEIGHT_SCAN_TASK_NUM_EXECUTE,    &weight_scan);
-Task tCollect_weight(COLLECT_WEIGHT_TASK_PERIOD, COLLECT_WEIGHT_TASK_NUM_EXECUTE, &collect_weight);
+//Task tCollect_weight(COLLECT_WEIGHT_TASK_PERIOD, COLLECT_WEIGHT_TASK_NUM_EXECUTE, &collect_weight);
 
 // Tasks to search for bases and unload weights
 Task tReturn_to_base(RETURN_TO_BASE_TASK_PERIOD, RETURN_TO_BASE_TASK_NUM_EXECUTE, &return_to_base);
@@ -1274,48 +1285,50 @@ void task_init() {
  
   // Register each active task before enabling it. The ultrasonic task stays
   // disabled until its pins and begin() calls are configured in robot_init().
-  taskManager.addTask(tRead_ultrasonic);
-  taskManager.addTask(tRead_infrared);
-  taskManager.addTask(tRead_colour);
-  taskManager.addTask(tRead_imu);
-  taskManager.addTask(tVL53L1X_sensor);
-  taskManager.addTask(tIR_Distance_sensor);
-  taskManager.addTask(tSensor_average);
-  taskManager.addTask(tDC_motor);
-  taskManager.addTask(tWeight_scan);
-  taskManager.addTask(tCollect_weight);
-  taskManager.addTask(tReturn_to_base);
-  taskManager.addTask(tDetect_base);
-  taskManager.addTask(tUnload_weights);
-  taskManager.addTask(tBT_stream_test);
-  taskManager.addTask(tOpticalFlow);
-  taskManager.addTask(tLD06_lidar);
-  taskManager.addTask(tLocalisation);
-  taskManager.addTask(tLidarFrontTest);
-  taskManager.addTask(tPOI_Detector);
-  taskManager.addTask(tToF_SearchPlanner);
-
-  tRead_ultrasonic.enable();
-  tRead_infrared.enable();
-  tRead_colour.enable();
-  tRead_imu.enable();
-  tVL53L1X_sensor.enable();
-  tIR_Distance_sensor.enable();
-  tSensor_average.enable();
-  tDC_motor.enable();
-  tWeight_scan.enable();
-  tCollect_weight.enable();
-  tReturn_to_base.enable();
-  tDetect_base.enable();
-  tUnload_weights.enable();
-  tBT_stream_test.enable();
-  tOpticalFlow.enable();
-  tLD06_lidar.enable();
-  tLidarFrontTest.enable();
-  tLocalisation.enable();
-  tPOI_Detector.enable();
-  tToF_SearchPlanner.enable();
-
+//   taskManager.addTask(tRead_ultrasonic);
+taskManager.addTask(tProximity_sensor);
+//   taskManager.addTask(tRead_infrared);
+//   taskManager.addTask(tRead_colour);
+//   taskManager.addTask(tRead_imu);
+//   taskManager.addTask(tVL53L1X_sensor);
+//   taskManager.addTask(tIR_Distance_sensor);
+//   taskManager.addTask(tSensor_average);
+//   taskManager.addTask(tDC_motor);
+//   taskManager.addTask(tWeight_scan);
+ // taskManager.addTask(tCollect_weight);
+//   taskManager.addTask(tReturn_to_base);
+//   taskManager.addTask(tDetect_base);
+//   taskManager.addTask(tUnload_weights);
+//   taskManager.addTask(tBT_stream_test);
+//   taskManager.addTask(tOpticalFlow);
+//   taskManager.addTask(tLD06_lidar);
+//   taskManager.addTask(tLocalisation);
+//   taskManager.addTask(tLidarFrontTest);
+//   taskManager.addTask(tPOI_Detector);
+//   taskManager.addTask(tToF_SearchPlanner);
+taskManager.addTask(tBig_Servo);
+//   tRead_ultrasonic.enable();
+//   tRead_infrared.enable();
+//   tRead_colour.enable();
+//   tRead_imu.enable();
+//   tVL53L1X_sensor.enable();
+//   tIR_Distance_sensor.enable();
+//   tSensor_average.enable();
+//   tDC_motor.enable();
+//   tWeight_scan.enable();
+  //tCollect_weight.enable();
+//   tReturn_to_base.enable();
+//   tDetect_base.enable();
+//   tUnload_weights.enable();
+//   tBT_stream_test.enable();
+//   tOpticalFlow.enable();
+//   tLD06_lidar.enable();
+//   tLidarFrontTest.enable();
+//   tLocalisation.enable();
+//   tPOI_Detector.enable();
+//   tToF_SearchPlanner.enable();
+tBig_Servo.enable();
+tProximity_sensor.enable();
  printlnBoth("Tasks have been initialised \n");
 }
 
