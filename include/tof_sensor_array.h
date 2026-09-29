@@ -5,6 +5,7 @@
 #include <Wire.h>
 #include <stdint.h>
 #include <VL53L1X.h>
+#include <VL53L0X.h>
 #include <SparkFunSX1509.h>
 
 class TOFSensorArray {
@@ -18,6 +19,13 @@ private:
     uint8_t ioExpanderAddress;
     bool initialized;
     uint16_t lastDistances[MAX_SENSORS];
+    int16_t distanceOffsets[MAX_SENSORS];
+    
+    // VL53L0X top sensor
+    VL53L0X *topSensor;
+    uint8_t topSensorXshutExpanderPin;
+    uint16_t topSensorDistance;
+    bool topSensorInitialized;
     
 public:
     // Structure to hold distance data from all sensors
@@ -27,7 +35,7 @@ public:
     };
     
     // Constructor
-    TOFSensorArray(uint8_t numSensors = 1, 
+    TOFSensorArray(uint8_t numSensors = 4, 
                    uint8_t ioExpanderAddr = 0x3F);
     
     // Set XSHUT pins for each sensor
@@ -42,14 +50,27 @@ public:
     // Print distance data to serial
     void printDistances(const TOFData& data);
     
+    // Set a per-sensor distance offset (mm)
+    void setDistanceOffset(uint8_t sensorIndex, int16_t offsetMm);
+
     // Get single sensor distance
     uint16_t getDistance(uint8_t sensorIndex);
     
     // Check if sensor is initialized
     bool isInitialized() const;
-    
+
     // Get number of sensors
     uint8_t getSensorCount() const;
+
+    // Diagnostic: enable a single sensor XSHUT and run I2C scan
+    void diagnoseSensorByIndex(uint8_t index);
+
+    // Top VL53L0X sensor control
+    void setTopSensorXshutPin(uint8_t expanderPin);
+    bool initializeTopSensor();
+    uint16_t readTopSensorDistance();
+    bool isTopSensorInitialized() const;
+    bool isTopSensorInArray() const;
 };
 
 #endif // TOF_SENSOR_ARRAY_H
