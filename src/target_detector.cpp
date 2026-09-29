@@ -79,6 +79,18 @@ void TieredTargetDetector::setSensorMounts(const SensorMount& nearA, const Senso
     mountFarB = farB;
 }
 
+GridPoint TieredTargetDetector::tofPointFromRange(
+    const SensorMount& mount,
+    uint16_t rangeMm) const {
+    // The detector frame uses +X to the robot's right and -Y toward the front.
+    const float angleRad = mount.boresightDeg * PI / 180.0f;
+    GridPoint point;
+    point.x = mount.xMm + rangeMm * sinf(angleRad);
+    point.y = mount.yMm - rangeMm * cosf(angleRad);
+    point.valid = true;
+    return point;
+}
+
 void TieredTargetDetector::setLidarOffset(float xMm, float yMm, float angleDeg) {
     lidar.setOffsetPosition(int16_t(xMm), int16_t(yMm), angleDeg);
 }
