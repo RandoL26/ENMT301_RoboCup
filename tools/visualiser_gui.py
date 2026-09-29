@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import struct
 import sys
 import math
 import time
@@ -52,6 +53,7 @@ PACKET_SCAN = 0x05
 PACKET_DIAG = 0x06
 PACKET_STATUS = 0x07
 PACKET_INFLATED_GRID = 0x08
+PACKET_LOCALISATION_DEBUG = 0x09
 
 POSE_FMT = "<fffH"
 POSE_SIZE = 14
@@ -127,6 +129,16 @@ class TelemetryState:
 
     scan_packet_count: int = 0
     scan_point_count: int = 0
+
+        # Localisation diagnostics
+    encoder_dx_m: float = 0.0
+    encoder_dtheta_rad: float = 0.0
+
+    flow_dx_m: float = 0.0
+    flow_dy_m: float = 0.0
+
+    imu_dtheta_rad: float = 0.0
+    imu_heading_deg: float = 0.0
 
 # ============================================================
 # TELEMETRY PACKET
@@ -310,6 +322,11 @@ class TelemetryReconstructor:
         # Inflated obstacle grid.
         if packet.packet_type == PACKET_INFLATED_GRID:
             return self.inflated_grid(packet.payload)
+
+        if packet.packet_type == PACKET_LOCALISATION_DEBUG:
+            return self.localisation_debug(
+                packet.payload
+            )        
 
         return False
 
@@ -687,6 +704,41 @@ class TelemetryReconstructor:
         return True
 
 
+    # --------------------------------------------------------
+    # LOCALISATION DEBUG
+    # --------------------------------------------------------
+
+    def localisation_debug(self, payload):
+
+        if len(payload) < 36:
+            return False
+
+        values = struct.unpack(
+            "<9f",
+            payload[:36],
+        )
+
+        (
+            self.state.encoder_dx_m,
+            self.state.encoder_dtheta_rad,
+            self.state.flow_dx_m,
+            self.state.flow_dy_m,
+            self.state.imu_dtheta_rad,
+            self.state.imu_heading_deg,
+            pose_x,
+            pose_y,
+            pose_theta,
+        ) = values
+
+        # Keep the normal pose synchronized with
+        # MappingNav's reported pose.
+        self.state.pose_x_m = pose_x
+        self.state.pose_y_m = pose_y
+        self.state.pose_theta_rad = pose_theta
+
+        return True
+
+
 # ============================================================
 # SERIAL WORKER
 # ============================================================
@@ -712,18 +764,33 @@ class SerialWorker(threading.Thread):
             threading.Event()
         )
 
+        self.reset_event = threading.Event()
+        self.command_queue = Queue()
+
     def stop(self):
 
         self.stop_event.set()
 
+
+    def reset_data(self):
+
+        self.reset_event.set()
+
+    def send_command(self, command):
+
+        self.command_queue.put(command)
+
     def run(self):
 
         parser = FrameParser()
-        reconstructor = (
-            TelemetryReconstructor()
-        )
+        reconstructor = TelemetryReconstructor()
 
         while not self.stop_event.is_set():
+
+            if self.reset_event.is_set():
+                parser = FrameParser()
+                reconstructor = TelemetryReconstructor()
+                self.reset_event.clear()
 
             try:
 
@@ -742,7 +809,40 @@ class SerialWorker(threading.Thread):
                         "[serial] connected"
                     )
 
+                    while not self.command_queue.empty():
+
+                        try:
+                            command = self.command_queue.get_nowait()
+
+                            ser.write(
+                                (command + "\n").encode("ascii")
+                            )
+
+                            print(
+                                f"[serial] command: {command}"
+                            )
+
+                        except Empty:
+                            break
+
                     while not self.stop_event.is_set():
+
+                        # Send queued commands to the Teensy.
+                        while not self.command_queue.empty():
+
+                            try:
+                                command = self.command_queue.get_nowait()
+
+                                ser.write(
+                                    (command + "\n").encode("ascii")
+                                )
+
+                                print(
+                                    f"[serial] command: {command}"
+                                )
+
+                            except Empty:
+                                break
 
                         data = ser.read(
                             4096
@@ -830,6 +930,31 @@ class SerialWorker(threading.Thread):
             scan_point_count=(
                 state.scan_point_count
             ),
+
+                        encoder_dx_m=(
+                state.encoder_dx_m
+            ),
+
+            encoder_dtheta_rad=(
+                state.encoder_dtheta_rad
+            ),
+
+            flow_dx_m=(
+                state.flow_dx_m
+            ),
+
+            flow_dy_m=(
+                state.flow_dy_m
+            ),
+
+            imu_dtheta_rad=(
+                state.imu_dtheta_rad
+            ),
+
+            imu_heading_deg=(
+                state.imu_heading_deg
+            ),
+
         )
 
         try:
@@ -1091,6 +1216,26 @@ class RoboCupVisualizer(QMainWindow):
 
         side_layout.addWidget(
             robot_group
+        )
+
+        self.localisation_label = QLabel(
+            "ENCODER:\n"
+            "  dX:      --\n"
+            "  dTheta:  --\n"
+            "FLOW:\n"
+            "  dX:      --\n"
+            "  dY:      --\n"
+            "IMU:\n"
+            "  dTheta:  --\n"
+            "  Heading: --"
+        )
+
+        self.localisation_label.setStyleSheet(
+            "font-family: monospace;"
+        )
+
+        side_layout.addWidget(
+            self.localisation_label
         )
 
         # ----------------------------------------------------
@@ -1587,6 +1732,10 @@ class RoboCupVisualizer(QMainWindow):
 
     def reset_data(self):
 
+        self.serial_worker.send_command("MAP RESET")
+        
+        self.serial_worker.reset_data()
+
         # Clear telemetry state
         self.state = TelemetryState()
 
@@ -1628,6 +1777,18 @@ class RoboCupVisualizer(QMainWindow):
             "Y:      --\n"
             "HEADING:--\n"
             "SPEED:  --"
+        )
+
+        self.localisation_label.setText(
+            "ENCODER:\n"
+            "  dX:      --\n"
+            "  dTheta:  --\n"
+            "FLOW:\n"
+            "  dX:      --\n"
+            "  dY:      --\n"
+            "IMU:\n"
+            "  dTheta:  --\n"
+            "  Heading: --"
         )
 
         self.planner_label.setText(
@@ -2011,6 +2172,18 @@ class RoboCupVisualizer(QMainWindow):
             f"Y:      {state.pose_y_m:7.3f} m\n"
             f"HEADING:{theta_deg:7.1f}°\n"
             f"SPEED:  --"
+        )
+
+        self.localisation_label.setText(
+            f"ENCODER:\n"
+            f"  dX:      {state.encoder_dx_m * 1000:7.1f} mm\n"
+            f"  dTheta:  {math.degrees(state.encoder_dtheta_rad):7.2f}°\n"
+            f"FLOW:\n"
+            f"  dX:      {state.flow_dx_m * 1000:7.1f} mm\n"
+            f"  dY:      {state.flow_dy_m * 1000:7.1f} mm\n"
+            f"IMU:\n"
+            f"  dTheta:  {math.degrees(state.imu_dtheta_rad):7.2f}°\n"
+            f"  Heading: {state.imu_heading_deg:7.2f}°"
         )
 
         # ----------------------------------------------------

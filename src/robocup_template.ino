@@ -18,7 +18,6 @@
 #include <Wire.h>                   //for I2C and SPI
 #include <TaskScheduler.h>          //scheduler
 #include <VL53L1X.h>                //VL53L1X distance sensor
-#include <VL53L0X.h>                //VL53L0X distance sensor for top target validation
 #include <stdarg.h>                 //for va_list in printf functions
 #include <stdio.h>                  //for vsnprintf
 #include <string.h>                 //for strcmp/sscanf parsing
@@ -440,18 +439,7 @@ void vl53l1x_sensor_callback(void) {
         if (i < tofData.sensorCount - 1) Serial.print("\t");
     }
 
-    uint16_t topDistance = 0xFFFF;
-    if (!tofSensorArray.isTopSensorInArray() && tofSensorArray.isTopSensorInitialized()) {
-        topDistance = tofSensorArray.readTopSensorDistance();
-        Serial.print("\tS5:");
-        if (topDistance == 0xFFFF) {
-            Serial.print("TIMEOUT");
-        } else {
-            Serial.print(topDistance);
-        }
-    } else if (!tofSensorArray.isTopSensorInArray()) {
-        Serial.print("\tS5:NOTINIT");
-    }
+    // Top (VL53L0X) sensor handling removed; only VL53L1X array processed here.
 
     // targetDetector.update() no longer takes a top sensor distance; it
     // reads the lidar via the LD06 instance internally (the LD06 task
@@ -745,6 +733,25 @@ void handle_motor_line(const char* line, Print* ackPort) {
     upperLine[sizeof(upperLine) - 1] = '\0';
     for (int i = 0; upperLine[i] != '\0'; i++) {
         upperLine[i] = toupper((unsigned char)upperLine[i]);
+    }
+
+    if (strcmp(upperLine, "MAP RESET") == 0) {
+        mappingNav.reset();
+        roboSlam.begin();
+        setRobotStartPosition();
+
+        cmd_left_motor = 0;
+        cmd_right_motor = 0;
+        applied_left_motor = 0;
+        applied_right_motor = 0;
+
+        if (ackPort != nullptr) {
+            ackPort->println("ACK MAP RESET");
+        } else {
+            Serial.println("ACK MAP RESET");
+        }
+
+        return;
     }
 
     int left = 0;
@@ -1197,10 +1204,8 @@ void robot_init() {
     Wire.setClock(400000); // use 400 kHz I2C
 
     // Initialize VL53L1X sensor array.
-    // The top VL53L0X will be held in reset via the expander until after array init completes.
     printlnBoth("Initialising VL53L1X Sensor Array...");
     tofSensorArray.setXSHUTPins(VL53L1X_XSHUT_PINS, VL53L1X_SENSOR_COUNT);
-    tofSensorArray.setTopSensorXshutPin(VL53L0X_TOP_XSHUT_EXPANDER_PIN);
     
     bool tofArrayOk = tofSensorArray.begin();
     if (!tofArrayOk) {
@@ -1230,13 +1235,6 @@ void robot_init() {
         tofSensorArray.setDistanceOffset(1, 0); // Sensor 1 offset
         tofSensorArray.setDistanceOffset(2, 0);  // Sensor 2 offset
         tofSensorArray.setDistanceOffset(3, -5);  // Sensor 3 offset
-    }
-
-    // Initialize top VL53L0X sensor using the integrated TOFSensorArray method
-    printlnBoth("Initialising top VL53L0X sensor on expander pin 4...");
-    tofSensorArray.setTopSensorXshutPin(VL53L0X_TOP_XSHUT_EXPANDER_PIN);
-    if (!tofSensorArray.initializeTopSensor()) {
-        printlnBoth("WARNING: Failed to initialize top VL53L0X sensor");
     }
 
     TieredTargetDetectorConfig targetConfig;
@@ -1360,7 +1358,7 @@ void task_init() {
     taskManager.addTask(tBT_stream_test);  // Disabled for control reliability
     taskManager.addTask(tOpticalFlow);        //reading optical flow sensor
     taskManager.addTask(tLD06_lidar);          //reading LD06 lidar
-    // taskManager.addTask(tLocalisation);        //sensor fusion localisation update
+    taskManager.addTask(tLocalisation);        //sensor fusion localisation update
     // taskManager.addTask(tPOI_Detector);        //POI detection from ToF
     // taskManager.addTask(tToF_SearchPlanner);   //search target generation
     // taskManager.addTask(tBig_Servo);

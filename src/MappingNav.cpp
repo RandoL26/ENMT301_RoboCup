@@ -318,7 +318,7 @@ void MappingNav::markRay(float start_x, float start_y,
 
     float t = 1.0f;
 
-    // Find intersection with vertical map boundaries.
+    // Vertical map boundaries.
     if (dx > 0.0f && end_x > map_max_x) {
       const float tx = (map_max_x - start_x) / dx;
       if (tx >= 0.0f && tx < t) t = tx;
@@ -327,7 +327,7 @@ void MappingNav::markRay(float start_x, float start_y,
       if (tx >= 0.0f && tx < t) t = tx;
     }
 
-    // Find intersection with horizontal map boundaries.
+    // Horizontal map boundaries.
     if (dy > 0.0f && end_y > map_max_y) {
       const float ty = (map_max_y - start_y) / dy;
       if (ty >= 0.0f && ty < t) t = ty;
@@ -339,15 +339,18 @@ void MappingNav::markRay(float start_x, float start_y,
     clipped_x = start_x + t * dx;
     clipped_y = start_y + t * dy;
 
-    // Keep the clipped point safely inside the final cell.
+    // Keep the clipped point safely inside the map.
     const float eps = 0.001f;
 
     if (clipped_x >= map_max_x)
       clipped_x = map_max_x - eps;
+
     if (clipped_y >= map_max_y)
       clipped_y = map_max_y - eps;
+
     if (clipped_x < 0.0f)
       clipped_x = 0.0f;
+
     if (clipped_y < 0.0f)
       clipped_y = 0.0f;
   }
@@ -356,11 +359,13 @@ void MappingNav::markRay(float start_x, float start_y,
 
   int32_t x0 = (int32_t)sx;
   int32_t y0 = (int32_t)sy;
+
   const int32_t x1 = (int32_t)ex;
   const int32_t y1 = (int32_t)ey;
 
   const int32_t dx = abs(x1 - x0);
   const int32_t sx_step = (x0 < x1) ? 1 : -1;
+
   const int32_t dy = -abs(y1 - y0);
   const int32_t sy_step = (y0 < y1) ? 1 : -1;
 
@@ -369,7 +374,9 @@ void MappingNav::markRay(float start_x, float start_y,
   const uint16_t origin_idx = indexOf(sx, sy);
 
   while (true) {
-    if (!inBoundsCell(x0, y0)) break;
+    if (!inBoundsCell(x0, y0)) {
+      break;
+    }
 
     const uint16_t idx =
         indexOf((uint16_t)x0, (uint16_t)y0);
@@ -380,16 +387,35 @@ void MappingNav::markRay(float start_x, float start_y,
     // Never modify the LiDAR's own cell.
     if (idx == origin_idx) {
       // Nothing to do.
-    } else if (endpoint) {
+    }
+    else if (endpoint) {
       if (mark_endpoint_occupied) {
         // Real LiDAR return: obstacle detected.
-        updateOccupancyEvidence(idx, +3);
-      } else {
+        // Close returns receive stronger confidence.
+        const float ray_dx = end_x - start_x;
+        const float ray_dy = end_y - start_y;
+        const float range =
+            sqrtf(ray_dx * ray_dx + ray_dy * ray_dy);
+
+        if (range <= LIDAR_CLOSE_RANGE_M) {
+          updateOccupancyEvidence(
+              idx,
+              LIDAR_CLOSE_HIT_SCORE);
+        }
+        else {
+          updateOccupancyEvidence(
+              idx,
+              LIDAR_FAR_HIT_SCORE);
+        }
+      }
+      else {
         // Ray reached the map boundary with no obstacle.
         maybeMarkFree(idx);
       }
+
       break;
-    } else {
+    }
+    else {
       // LiDAR passed through this cell without hitting anything.
       maybeMarkFree(idx);
     }
@@ -753,13 +779,13 @@ float MappingNav::edgeCost(uint16_t from, uint16_t to) const {
 
   // Unknown is traversable but slightly penalized.
   if (getOccupancy(to) == OCC_UNKNOWN) {
-    cost *= 1.20f;
-  }
+  cost *= UNKNOWN_CELL_COST;
+}
 
   // Terrain remains traversable; optional small penalties can be tuned.
   const Terrain t = getTerrain(to);
   if (t == TERRAIN_RAMP) {
-    cost *= 1.10f;
+    cost *= RAMP_COST;
   } else if (t == TERRAIN_SPEED_BUMP) {
     cost *= 1.05f;
   }

@@ -1,4 +1,5 @@
 #include "RoboSLAM.h"
+#include "telemetry.h"
 #include <Arduino.h>
 #include <math.h>
 
@@ -95,8 +96,7 @@ void RoboSLAM::processScan(LD06 &ld, const IMU_Data &imu) {
 
   // LiDAR filtering limits.
   // Tune these after testing on the real arena.
-  const float LIDAR_MIN_RANGE_M = 0.05f;  // 5 cm
-  const float LIDAR_MAX_RANGE_M = 8.0f;   // usable mapping range
+ 
 
   if (n > MAX_RAYS) n = MAX_RAYS;
 
@@ -105,6 +105,14 @@ void RoboSLAM::processScan(LD06 &ld, const IMU_Data &imu) {
   for (uint16_t i = 0; i < n; ++i) {
     const auto *p = ld.getPoints(i);
     if (!p) continue;
+
+    // Reject obviously invalid LiDAR measurements.
+    if (p->distance == 0) {
+      // Keep zero-distance readings as no-hit rays.
+    } else if (p->distance == 0xFFFF) {
+      // Invalid / saturated sensor value.
+      continue;
+    }
 
     const float distance_m =
         ((float)p->distance) / 1000.0f;
@@ -117,7 +125,7 @@ void RoboSLAM::processScan(LD06 &ld, const IMU_Data &imu) {
 
       r.valid = true;
       r.has_hit = false;
-      r.kind = MappingNav::SENSOR_TOF;
+      r.kind = MappingNav::SENSOR_LIDAR;
 
       const float ang_rad =
           (p->angle) * (M_PI / 180.0f);
@@ -126,14 +134,14 @@ void RoboSLAM::processScan(LD06 &ld, const IMU_Data &imu) {
           ang_rad + LIDAR_YAW_OFFSET_RAD;
 
       r.distance_m = 0.0f;
-      r.max_range_m = LIDAR_MAX_RANGE_M;
+      r.max_range_m = MappingNav::LIDAR_MAX_RANGE_M;
 
       continue;
     }
 
     // Reject measurements that are too close or too far away.
-    if (distance_m < LIDAR_MIN_RANGE_M ||
-        distance_m > LIDAR_MAX_RANGE_M) {
+    if (distance_m < MappingNav::LIDAR_MIN_RANGE_M ||
+        distance_m > MappingNav::LIDAR_MAX_RANGE_M) {
       continue;
     }
 
@@ -141,7 +149,7 @@ void RoboSLAM::processScan(LD06 &ld, const IMU_Data &imu) {
 
     r.valid = true;
     r.has_hit = true;
-    r.kind = MappingNav::SENSOR_TOF;
+    r.kind = MappingNav::SENSOR_LIDAR;
 
     const float ang_rad =
         (p->angle) * (M_PI / 180.0f);
@@ -150,11 +158,14 @@ void RoboSLAM::processScan(LD06 &ld, const IMU_Data &imu) {
         ang_rad + LIDAR_YAW_OFFSET_RAD;
 
     r.distance_m = distance_m;
-    r.max_range_m = LIDAR_MAX_RANGE_M;
+    r.max_range_m = MappingNav::LIDAR_MAX_RANGE_M;
   }
 
   // Only send the filtered rays to the map.
-  m_nav.updateGridFromSensors(rays, valid_rays);
+  // Only update the map when we have valid rays.
+  if (valid_rays > 0) {
+    m_nav.updateGridFromSensors(rays, valid_rays);
+  }
 
   // Restore robot-centre pose.
   m_nav.setPose(pose.x_m, pose.y_m, pose.theta_rad);
@@ -172,4 +183,18 @@ void RoboSLAM::processScan(LD06 &ld, const IMU_Data &imu) {
 
   m_nav.replanPath(robot_radius_m);
 
+  // Send localisation diagnostics.
+  // This lets the PC visualiser compare the individual
+  // sensor contributions with the final MappingNav pose.
+  telemetry_send_localisation_debug(
+      encoder_dx,
+      encoder_dtheta,
+      dfx,
+      dfy,
+      imu_dtheta_rad,
+      heading_now,
+      m_nav.getPose()
+  );
+
 }
+
