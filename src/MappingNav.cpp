@@ -264,7 +264,7 @@ bool MappingNav::replanPath(float robot_radius_m) {
     }
   }
 
-  if (!computeShortestPath(NUM_CELLS * 20UL)) {
+  // Bound each planning slice so path planning cannot monopolise the Teensy CPU.\n  // D* Lite retains its open-list state between calls when more work is needed.\n  constexpr uint32_t PLANNER_ITERATIONS_PER_SLICE = 2000UL;\n  if (!computeShortestPath(PLANNER_ITERATIONS_PER_SLICE)) {
     m_path_len = 0;
     return false;
   }
