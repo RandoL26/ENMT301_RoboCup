@@ -18,10 +18,10 @@
 #include <Wire.h>                   //for I2C and SPI
 #include <TaskScheduler.h>          //scheduler
 #include <VL53L1X.h>                //VL53L1X distance sensor
-#include <VL53L0X.h>                //VL53L0X distance sensor for top target validation
 #include <stdarg.h>                 //for va_list in printf functions
 #include <stdio.h>                  //for vsnprintf
 #include <string.h>                 //for strcmp/sscanf parsing
+#include <stdbool.h>
 #include "BNO055_support.h"         //IMU sensor 
 
 // Custom headers
@@ -36,8 +36,6 @@
 #include "ir_xy_position.h"         //IR XY position sensor
 #include "ir_distance_sensor.h"     //2Y0A02 IR distance sensor
 #include "tof_sensor_array.h"       //TOF (VL53L1X) sensor array
-#include "target_detector.h"        //Tier-based target / obstacle detection
-#include "TOF_X8.h"                 // DFRobot Matrix Lidar 8x8 (TOF_X8)
 #include "dc_motor.h"               //DC motor control 
 #include "motor_control.h"          //PID/SYNC command handling
 #include "ch9143_bluetooth.h"       //CH9143 Bluetooth module
@@ -51,6 +49,7 @@
 #include "ToFSearchPlanner.h"        // Search target generation
 #include "ToFGeometry.h"             // Shared ToF sensor geometry
 #include "telemetry.h"
+#include "target_detector.h"
 
 // Gate legacy ASCII Teleplot / diagnostic prints so they don't corrupt
 // the framed binary telemetry stream. Set to 1 to allow ASCII debug.
@@ -138,8 +137,8 @@
 #define IR_DISTANCE_SENSOR_PIN    A9  // Analog pin for 2Y0A02 IR distance sensor
 
 // VL53L1X sensor configuration
-const uint8_t VL53L1X_SENSOR_COUNT = 1;  // Update this if you add more sensors
-const uint8_t VL53L1X_XSHUT_PINS[VL53L1X_SENSOR_COUNT] = { 18 };  // Update this with the XSHUT pins for each sensor
+const uint8_t VL53L1X_SENSOR_COUNT = 4;  // Update this if you add more sensors
+const uint8_t VL53L1X_XSHUT_PINS[VL53L1X_SENSOR_COUNT] = {0, 3, 2, 1};  // Update this with the XSHUT pins for each sensor
 
 #define START_BUTTON_PIN 21
 
@@ -153,7 +152,7 @@ enum RobotStartSide {
 };
 
 // Change this to START_LEFT or START_RIGHT
-RobotStartSide robotStartSide = START_RIGHT;
+RobotStartSide robotStartSide = START_LEFT;
 
 // IMPORTANT:
 // Replace these with the actual coordinates from your
@@ -183,6 +182,7 @@ bool lastStartButtonState = HIGH;
 unsigned long startButtonDebounceTime = 0;
 const unsigned long START_BUTTON_DEBOUNCE_MS = 50;
 
+bool pickingUp = false;
 // DC Motor PIN definitions
 #define DC_M1_PIN 0              //PWM pin for DC motor control (can be extended to 2 motors)
 #define DC_M2_PIN 1              //PWM pin for DC motor control (can be extended to 2 motors)
@@ -254,11 +254,23 @@ IRXYPosition irXYSensor;
 // IR Distance Sensor instance (2Y0A02)
 IRDistanceSensor irDistanceSensor(IR_DISTANCE_SENSOR_PIN);
 
-// TOF Sensor Array instance (explicit SX1509 I2C address 0x3F)
-TOFSensorArray tofSensorArray(VL53L1X_SENSOR_COUNT, 0x3F);
-// Note: TieredTargetDetector now requires the LD06 lidar instance as the
-// second parameter so it can compare TOF hits against lidar returns.
-TieredTargetDetector targetDetector(tofSensorArray, ld06, 0, 1, 2, 3);
+// TOF Sensor Array instance
+TOFSensorArray tofSensorArray(VL53L1X_SENSOR_COUNT);
+
+// ToF sensor indices
+constexpr uint8_t TOF_NEAR_A = 0;
+constexpr uint8_t TOF_NEAR_B = 1;
+constexpr uint8_t TOF_FAR_A  = 2;
+constexpr uint8_t TOF_FAR_B  = 3;
+
+TieredTargetDetector targetDetector(
+    tofSensorArray,
+    ld06,
+    TOF_NEAR_A,
+    TOF_NEAR_B,
+    TOF_FAR_A,
+    TOF_FAR_B
+);
 
 // POI detection system
 POIDetector poiDetector;
@@ -294,20 +306,13 @@ static const int16_t MOTOR_SLEW_STEP = 8;
 void process_bluetooth_motor_commands(void);
 void process_usb_motor_commands(void);
 void handle_motor_line(const char* line, Print* ackPort);
-bool handle_sensor_line(const char* line, Print* ackPort);
 int16_t slew_toward(int16_t current, int16_t target, int16_t step);
 
 // Task wrapper for proximity sensor reading
 void proximity_sensor_callback(void) {
     proximitySensor.update();
     proximitySensor.printStatus();
-    if (!(proximitySensor.isObjectDetected())){
-        collect_weight();
-        bigServo_move(168);
-    } else {
-        digitalWrite(ELECTROMAGNET_PIN, HIGH);
-        bigServo_move(169);
-    }
+    
 }
 
 // Task wrapper for ultrasonic sensor reading (array with 2 sensors)
@@ -390,6 +395,11 @@ void ld06_lidar_callback(void) {
     }
 }
 
+// Temporary LiDAR coordinate test
+void lidar_front_test_callback(void) {
+    targetDetector.debugPrintLidarFrontTest();
+}
+
 // Task wrapper for localisation sensor fusion update
 void localisation_update_callback(void) {
     // Perform sensor fusion (prediction from IMU + flow)
@@ -418,75 +428,8 @@ void localisation_update_callback(void) {
 // Task wrapper for VL53L1X sensor reading
 void vl53l1x_sensor_callback(void) {
     if (tofSensorArray.isInitialized()) {
-        static bool warned = false;
-        if (!warned) {
-            Serial.println("WARNING: VL53L1X sensor array not initialized, no S0-S3 data available");
-            warned = true;
-        }
-        return;
-    }
-
-    TOFSensorArray::TOFData tofData = tofSensorArray.readDistances();
-
-    // Print VL53L1X distances inline
-    Serial.print("\t");
-    for (uint8_t i = 0; i < tofData.sensorCount; i++) {
-        Serial.print("S");
-        Serial.print(i);
-        Serial.print(":");
-        if (tofData.distances[i] == 0xFFFF) {
-            Serial.print("TIMEOUT");
-        } else {
-            Serial.print(tofData.distances[i]);
-        }
-        if (i < tofData.sensorCount - 1) Serial.print("\t");
-    }
-
-    uint16_t topDistance = 0xFFFF;
-    if (!tofSensorArray.isTopSensorInArray() && tofSensorArray.isTopSensorInitialized()) {
-        topDistance = tofSensorArray.readTopSensorDistance();
-        Serial.print("\tS5:");
-        if (topDistance == 0xFFFF) {
-            Serial.print("TIMEOUT");
-        } else {
-            Serial.print(topDistance);
-        }
-    } else if (!tofSensorArray.isTopSensorInArray()) {
-        Serial.print("\tS5:NOTINIT");
-    }
-
-    // targetDetector.update() no longer takes a top sensor distance; it
-    // reads the lidar via the LD06 instance internally (the LD06 task
-    // already calls ld06.readScan()).
-    targetDetector.update();
-
-    // If the DFRobot Matrix Lidar (8x8) is present, print it as 8 rows
-    if (TOF_X8_isInitialized()) {
-        uint16_t x8buf[64];
-        if (TOF_X8_readAll(x8buf, 64)) {
-            // Print each row on its own line, prefixed with a tab for alignment
-            Serial.print('\n');
-            Serial.print('\n');
-            for (uint8_t y = 0; y < 8; y++) {
-                Serial.print('\t');
-                Serial.print("Y");
-                Serial.print(y);
-                Serial.print(": ");
-                for (uint8_t x = 0; x < 8; x++) {
-                    Serial.print(x8buf[y * 8 + x]);
-                    if (x < 7) Serial.print(",");
-                }
-                Serial.println();
-            }
-            Serial.print('\n');
-        } else {
-            Serial.print('\t');
-            Serial.println("X8:ERR");
-        }
-    } else {
-        // No X8 initialization; print explicit marker so absence is visible
-        Serial.print('\t');
-        Serial.println("X8:NOTINIT");
+        TOFSensorArray::TOFData tofData = tofSensorArray.readDistances();
+        tofSensorArray.printDistances(tofData);
     }
 }
 
@@ -683,9 +626,7 @@ void process_bluetooth_motor_commands(void) {
         if (c == '\n') {
             lineBuffer[idx] = '\0';
             if (idx > 0) {
-                if (!handle_sensor_line(lineBuffer, bluetooth.isInitialized() ? (Print*)&Serial7 : nullptr)) {
-                    handle_motor_line(lineBuffer, bluetooth.isInitialized() ? (Print*)&Serial7 : nullptr);
-                }
+                handle_motor_line(lineBuffer, bluetooth.isInitialized() ? (Print*)&Serial7 : nullptr);
             }
             idx = 0;
             continue;
@@ -715,9 +656,7 @@ void process_usb_motor_commands(void) {
         if (c == '\n') {
             lineBuffer[idx] = '\0';
             if (idx > 0) {
-                if (!handle_sensor_line(lineBuffer, &Serial)) {
-                    handle_motor_line(lineBuffer, &Serial);
-                }
+                handle_motor_line(lineBuffer, &Serial);
             }
             idx = 0;
             continue;
@@ -843,38 +782,6 @@ void handle_motor_line(const char* line, Print* ackPort) {
     }
 }
 
-bool handle_sensor_line(const char* line, Print* ackPort) {
-    // Convert input line to uppercase for case-insensitive command matching
-    char upperLine[64];
-    strncpy(upperLine, line, sizeof(upperLine) - 1);
-    upperLine[sizeof(upperLine) - 1] = '\0';
-    for (int i = 0; upperLine[i] != '\0'; i++) {
-        upperLine[i] = toupper((unsigned char)upperLine[i]);
-    }
-
-    if (strcmp(upperLine, "SENSOR DEBUG") == 0) {
-        if (ackPort != nullptr) {
-            ackPort->println("SENSOR DEBUG:");
-            targetDetector.debugPrint();
-        } else {
-            Serial.println("SENSOR DEBUG:");
-            targetDetector.debugPrint();
-        }
-        return true;
-    }
-
-    if (strncmp(upperLine, "SENSOR", 6) == 0) {
-        if (ackPort != nullptr) {
-            ackPort->println("ERR Unknown sensor command");
-        } else {
-            Serial.println("ERR Unknown sensor command");
-        }
-        return true;
-    }
-
-    return false;
-}
-
 // Herkulex continuous test callback: toggles between -100 and 100 degrees
 void herkulex_test_callback() {
     static bool toggle = false;
@@ -888,15 +795,12 @@ void herkulex_test_callback() {
 }
 int angle = 0;
 void big_servo_callback() {
-    
-    if (angle<50){
-        angle += 10;
-        bigServo_move(90);
-    } else if (angle<100) {
-        bigServo_move(180);
-        angle += 10;
+    if (!(proximitySensor.isObjectDetected())){
+        collect_weight();
+        
     } else {
-        angle = 0;
+        digitalWrite(ELECTROMAGNET_PIN, HIGH);
+        bigServo_move(169);
     }
     
 }
@@ -917,10 +821,10 @@ Task tUltrasonic_sensor(ULTRASONIC_SENSOR_READ_PERIOD, ULTRASONIC_SENSOR_NUM_EXE
 Task tColor_sensor(COLOUR_READ_TASK_PERIOD, COLOUR_READ_TASK_NUM_EXECUTE, &color_sensor_callback);
 Task tIR_XY_Position(IR_READ_TASK_PERIOD, IR_READ_TASK_NUM_EXECUTE, &ir_xy_position_callback);
 Task tVL53L1X_sensor(VL53L1X_SENSOR_READ_PERIOD, VL53L1X_SENSOR_NUM_EXECUTE, &vl53l1x_sensor_callback);
-Task tTOF_X8(VL53L1X_SENSOR_READ_PERIOD, VL53L1X_SENSOR_NUM_EXECUTE, &TOF_X8_task_callback);
 Task tIR_Distance_sensor(IR_DISTANCE_SENSOR_READ_PERIOD, IR_DISTANCE_SENSOR_NUM_EXECUTE, &ir_distance_sensor_callback);
 Task tOpticalFlow(OF_READ_TASK_PERIOD, OF_READ_TASK_NUM_EXECUTE, &optical_flow_callback);
 Task tLD06_lidar(LD06_READ_TASK_PERIOD, LD06_READ_TASK_NUM_EXECUTE, &ld06_lidar_callback);
+Task tLidarFrontTest(500, -1, &lidar_front_test_callback); // Temporary pls remove
 Task tLocalisation(LOCALISATION_UPDATE_PERIOD, LOCALISATION_UPDATE_NUM_EXECUTE, &localisation_update_callback);
 Task tPOI_Detector(POI_DETECTOR_UPDATE_PERIOD, POI_DETECTOR_UPDATE_NUM_EXECUTE, &poi_detector_callback);
 Task tToF_SearchPlanner(TOF_SEARCH_PLANNER_PERIOD, TOF_SEARCH_PLANNER_NUM_EXECUTE, &tof_search_planner_callback);
@@ -1068,11 +972,11 @@ void setup() {
   delay(2000);  // Give USB serial time to stabilize
   Serial.println("\n\n=== RoboCup Robot Starting ===");
   
-// CH9143 two-chip bridge architecture:
-//   PC (USB-C) --> CH9143 [USB chip]  ~~~BLE~~~  CH9143 [UART chip] --> Serial7 --> Teensy
-// The UART chip communicates at 115200 (CH9143 factory default).
-// No Bluetooth pairing needed on the PC \u2014 it connects via USB-C to the USB chip.
-// Serial7 is initialized by bluetooth.begin() during robot_init().
+  // CH9143 two-chip bridge architecture:
+  //   PC (USB-C) --> CH9143 [USB chip]  ~~~BLE~~~  CH9143 [UART chip] --> Serial7 --> Teensy
+  // The UART chip communicates at 115200 (CH9143 factory default).
+  // No Bluetooth pairing needed on the PC \u2014 it connects via USB-C to the USB chip.
+    // Serial7 is initialized by bluetooth.begin() during robot_init().
   
   Wire.begin();        // MUST be called FIRST - before any I2C operations
   pin_init();
@@ -1130,6 +1034,7 @@ void robot_init() {
 
     // Initialise Herkulex smart servo using a hardware UART (avoids SoftwareSerial)
     // On Teensy/Mega use Serial1 (pins 0/1 on many boards)
+    /*
     printlnBoth("Initialising Herkulex Smart Servo on Serial1...");
     Herkulex.begin(115200, HERKULEX_RX_PIN, HERKULEX_TX_PIN);
     delay(100);
@@ -1157,7 +1062,7 @@ void robot_init() {
     Herkulex.moveOneAngle(HERKULEX_ID, 100, 1000, LED_GREEN);
     delay(1200);
     printlnBoth("Herkulex test move complete\n");
-    
+    */
     
     printlnBoth("Initialising IR XY Position Sensor...");
     irXYSensor.begin();
@@ -1196,76 +1101,28 @@ void robot_init() {
     printlnBoth("Initialising IR Distance Sensor (2Y0A02)...");
     irDistanceSensor.begin();
     
-    printlnBoth("Initialising TOF Sensors...");
+    printlnBoth("Initialising TOF (VL53L1X) Sensor Array...");
     Wire.setClock(400000); // use 400 kHz I2C
-
-    // Initialize VL53L1X sensor array.
-    // The top VL53L0X will be held in reset via the expander until after array init completes.
-    printlnBoth("Initialising VL53L1X Sensor Array...");
-    tofSensorArray.setXSHUTPins(VL53L1X_XSHUT_PINS, VL53L1X_SENSOR_COUNT);
-    tofSensorArray.setTopSensorXshutPin(VL53L0X_TOP_XSHUT_EXPANDER_PIN);
     
-    bool tofArrayOk = tofSensorArray.begin();
-    if (!tofArrayOk) {
+    // Set XSHUT pins for each sensor
+    tofSensorArray.setXSHUTPins(VL53L1X_XSHUT_PINS, VL53L1X_SENSOR_COUNT);
+    
+    // Initialize the TOF sensor array
+    if (!tofSensorArray.begin()) {
 
     telemetry_tof_ok = false;
 
-    printlnBoth(
-        "WARNING: Failed to initialize TOF sensor array"
-    );
-        printlnBoth("Running TOF XSHUT diagnostic for each sensor...");
-        for (uint8_t i = 0; i < VL53L1X_SENSOR_COUNT; i++) {
-            Serial.print("--- Diagnostic for TOF sensor index ");
-            Serial.println(i);
-            tofSensorArray.diagnoseSensorByIndex(i);
-            delay(500);
-        }
+    printlnBoth("WARNING: Failed to initialize TOF sensor array");
 
     } else {
 
     telemetry_tof_ok = true;
 
-    printlnBoth(
-        "TOF sensor array initialized successfully"
-    );
-        printlnBoth("VL53L1X sensor array initialized successfully");
-        tofSensorArray.setDistanceOffset(0, -40);   // Sensor 0 offset
-        tofSensorArray.setDistanceOffset(1, 0); // Sensor 1 offset
+    printlnBoth("TOF sensor array initialized successfully");
+        tofSensorArray.setDistanceOffset(0, 0);   // Sensor 0 offset
+        tofSensorArray.setDistanceOffset(1, -35); // Sensor 1 offset
         tofSensorArray.setDistanceOffset(2, 0);  // Sensor 2 offset
-        tofSensorArray.setDistanceOffset(3, -5);  // Sensor 3 offset
-    }
-
-    // Initialize top VL53L0X sensor using the integrated TOFSensorArray method
-    printlnBoth("Initialising top VL53L0X sensor on expander pin 4...");
-    tofSensorArray.setTopSensorXshutPin(VL53L0X_TOP_XSHUT_EXPANDER_PIN);
-    if (!tofSensorArray.initializeTopSensor()) {
-        printlnBoth("WARNING: Failed to initialize top VL53L0X sensor");
-    }
-
-    TieredTargetDetectorConfig targetConfig;
-    targetConfig.nearIntersectMm = 200;
-    targetConfig.farIntersectMm = 400;
-    targetConfig.intersectionToleranceMm = 50;
-    // Map the prior "top sensor" semantics into the new lidar-based
-    // config: treat the old clearance/reject-margin as an expected
-    // target height and tolerance, and tighten lidar matching accordingly.
-    targetConfig.targetHeightMm = 80;
-    targetConfig.targetHeightToleranceMm = 40;
-    targetConfig.toleratedWidthMm = 50; // tolerated target lateral width (mm)
-    // Lidar matching tolerances (how closely a lidar return must match a TOF
-    // hit to be considered the same surface / an obstacle)
-    targetConfig.maxDetectionRangeMm = 800;
-    targetConfig.lidarMatchToleranceMm = 40;
-    targetConfig.lidarBearingToleranceDeg = 1.0f;
-    targetConfig.useAngleGate = false;
-    targetDetector.setConfig(targetConfig);
-
-    // Initialize optional DFRobot Matrix Lidar (8x8 matrix) if connected
-    printlnBoth("Initialising DFRobot Matrix Lidar (TOF_X8)...");
-    if (!TOF_X8_begin()) {
-        printlnBoth("WARNING: TOF_X8 initialization failed or not present");
-    } else {
-        printlnBoth("TOF_X8 initialized successfully");
+        tofSensorArray.setDistanceOffset(3, 0);  // Sensor 3 offset
     }
     
     printlnBoth("Initialising IMU (BNO055)...");
@@ -1345,11 +1202,10 @@ void task_init() {
     // taskManager.addTask(tColor_sensor);       //reading color sensor
     // taskManager.addTask(tIR_XY_Position);     //reading IR XY position sensor
     taskManager.addTask(tVL53L1X_sensor);     //reading VL53L1X sensors
-    //taskManager.addTask(tTOF_X8);              //reading DFRobot Matrix Lidar 8x8 (if present)
     //taskManager.addTask(tIR_Distance_sensor); //reading IR distance sensor (2Y0A02)  
     // taskManager.addTask(tSensor_average);
     taskManager.addTask(tDC_motor);          //DC motor control
-//   taskManager.addTask(tSet_motor); 
+    //taskManager.addTask(tSet_motor); 
   // taskManager.addTask(tWeight_scan);
   // taskManager.addTask(tCollect_weight);
   // taskManager.addTask(tReturn_to_base);
@@ -1363,10 +1219,11 @@ void task_init() {
     taskManager.addTask(tBT_stream_test);  // Disabled for control reliability
     taskManager.addTask(tOpticalFlow);        //reading optical flow sensor
     taskManager.addTask(tLD06_lidar);          //reading LD06 lidar
+    taskManager.addTask(tLidarFrontTest);
     // taskManager.addTask(tLocalisation);        //sensor fusion localisation update
     // taskManager.addTask(tPOI_Detector);        //POI detection from ToF
     // taskManager.addTask(tToF_SearchPlanner);   //search target generation
-    // taskManager.addTask(tBig_Servo);
+    //taskManager.addTask(tBig_Servo);
     //enable the tasks
   tRead_ultrasonic.enable();
   tRead_infrared.enable();
@@ -1376,24 +1233,24 @@ void task_init() {
   //tUltrasonic_sensor.enable();
   //tColor_sensor.enable();
   tIR_XY_Position.enable();
-  //tVL53L1X_sensor.enable();
+  tVL53L1X_sensor.enable();
   tIR_Distance_sensor.enable();
-  tTOF_X8.enable();
   tSensor_average.enable();
   tDC_motor.enable();
-//   tSet_motor.enable();
+  //tSet_motor.enable();
   tWeight_scan.enable();
   tCollect_weight.enable();
   tReturn_to_base.enable();
   tDetect_base.enable();
   tUnload_weights.enable();
-  tBig_Servo.enable();
+  //tBig_Servo.enable();
 //   tCheck_watchdog.enable();
 //   tVictory_dance.enable();
-   tHerkulexTest.enable();
+   //tHerkulexTest.enable();
     tBT_stream_test.enable();  // Disabled for control reliability
     tOpticalFlow.enable();
     tLD06_lidar.enable();
+    tLidarFrontTest.enable();
     tLocalisation.enable();
     tPOI_Detector.enable();
     tToF_SearchPlanner.enable();

@@ -21,6 +21,13 @@ private:
     uint16_t lastDistances[MAX_SENSORS];
     int16_t distanceOffsets[MAX_SENSORS];
     
+    // ToF averaging filter
+    static const uint8_t AVERAGE_SAMPLES = 5;
+
+    uint16_t distanceHistory[MAX_SENSORS][AVERAGE_SAMPLES];
+    uint8_t historyCount[MAX_SENSORS];
+    uint8_t historyIndex[MAX_SENSORS];
+    
     // VL53L0X top sensor
     VL53L0X *topSensor;
     uint8_t topSensorXshutExpanderPin;
