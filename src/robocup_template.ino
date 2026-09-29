@@ -60,6 +60,7 @@
 #define OPTICAL_FLOW_DEBUG 0
 
 #define TOF_DEBUG 1
+#define OPTICAL_FLOW_SERIAL_TEST 0
 
 #define PROXIMITY_DEBUG 0
 
@@ -370,8 +371,6 @@ void optical_flow_callback(void) {
         Serial.printf("OpticalFlow totalX: %.2f mm  totalY: %.2f mm\n",
                     totalX, totalY);
         #endif
-        // Update localisation with optical flow
-        localisation.updateOpticalFlow(opticalFlow);
     }
 }
 
@@ -410,30 +409,6 @@ void lidar_front_test_callback(void) {
     targetDetector.debugPrint();
 }
 
-// Task wrapper for localisation sensor fusion update
-void localisation_update_callback(void) {
-    // Perform sensor fusion (prediction from IMU + flow)
-    localisation.updateFromSensors();
-    
-    // Optional: print diagnostics periodically (every 1000 ms)
-    static unsigned long last_diag_print = 0;
-    unsigned long now = millis();
-    if (now - last_diag_print >= 1000) {
-        last_diag_print = now;
-        
-        // Print fused localisation state
-        RobotPose pose = localisation.getPose();
-        LocalisationDiags diags = localisation.getDiags();
-        #if LOCALISATION_DEBUG
-        printfBoth("LOCALISATION: x=%.1f mm, y=%.1f mm, theta=%.3f rad | "
-                   "flow: dx=%.1f, dy=%.1f | "
-                   "lidar_match=%u, accepted=%u, frames=%lu\n",
-                   pose.x_mm, pose.y_mm, pose.theta_rad,
-                   diags.flow_dx_mm, diags.flow_dy_mm,
-                   diags.lidar_match_score, diags.lidar_correction_accepted,
-                   diags.frame_count);
-        #endif
-    }
 // 100 Hz authoritative pose prediction task
 void pose_prediction_callback(void) {
     roboSlam.updatePrediction(current_imu_data, millis());
@@ -500,7 +475,7 @@ void poi_detector_callback(void) {
         float tof_distance_m = (tofData.sensorCount > 0) ? (tofData.distances[0] / 1000.0f) : 0.0f;
         
         // Update POI detector with fused pose and occupancy map
-        poiDetector.update(localisation, mappingNav, tof_distance_m);
+        poiDetector.update(mappingNav, tof_distance_m);
         
         // Update ToF coverage map if reading is valid
         if (tof_distance_m > 0.0f) {
