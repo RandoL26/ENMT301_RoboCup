@@ -151,7 +151,7 @@
 const uint8_t VL53L1X_SENSOR_COUNT = 4;  // Update this if you add more sensors
 const uint8_t VL53L1X_XSHUT_PINS[VL53L1X_SENSOR_COUNT] = {0, 3, 2, 1};  // Update this with the XSHUT pins for each sensor
 
-#define START_BUTTON_PIN 21
+#define START_BUTTON_PIN 25
 
 // ============================================================
 // ROBOT START POSITION
@@ -175,7 +175,7 @@ const float START_LEFT_THETA_RAD = 0.0f;
 
 const float START_RIGHT_X_M = 2.10f;
 const float START_RIGHT_Y_M = 0.30f;
-const float START_RIGHT_THETA_RAD = PI;
+const float START_RIGHT_THETA_RAD = 0.0f;
 
 // ============================================================
 // SENSOR STATUS
@@ -190,9 +190,21 @@ bool binary_telemetry_active = OPTICAL_FLOW_SERIAL_TEST;
 
 
 bool robotStarted = false;
+// Set true to route USB/Bluetooth MOTOR commands directly to the motor task.
+// Leave false to use the autonomous navigator.
+bool manual_motor_control_enabled = true;
 bool lastStartButtonState = HIGH;
 unsigned long startButtonDebounceTime = 0;
 const unsigned long START_BUTTON_DEBOUNCE_MS = 50;
+static const unsigned long AUTONOMOUS_SCAN_INTERVAL_MS = 10000;
+static const unsigned long AUTONOMOUS_SCAN_TIMEOUT_MS = 20000;
+static const float AUTONOMOUS_SCAN_TARGET_RAD = 6.28319f; // One full rotation
+static const int16_t AUTONOMOUS_SCAN_SPEED = 28;
+static bool autonomous_scan_active = false;
+static unsigned long autonomous_last_scan_ms = 0;
+static unsigned long autonomous_scan_start_ms = 0;
+static float autonomous_scan_last_heading_rad = 0.0f;
+static float autonomous_scan_rotation_rad = 0.0f;
 
 bool pickingUp = false;
 // DC Motor PIN definitions
@@ -280,6 +292,7 @@ TieredTargetDetector targetDetector(
 POIDetector poiDetector;
 ToFCoverageMap tofCoverageMap;
 ToFSearchPlanner searchPlanner;
+bool target_navigation_active = false;
 
 // ToF sensor calibration (MUST BE CALIBRATED FOR YOUR ROBOT)
 ToFExtrinsics tof_extrinsics = {0.0f, 0.0f, 0.0f};  // x_offset_m, y_offset_m, yaw_offset_rad
@@ -461,8 +474,6 @@ void vl53l1x_sensor_callback(void) {
     TOFSensorArray::TOFData tofData =
         tofSensorArray.readDistances();
 
-    Serial.print("\n");
-
     #if TOF_DEBUG
     #if TELEMETRY_ALLOW_ASCII_TELEPLOT
     Serial.print("\t");
@@ -485,12 +496,49 @@ void vl53l1x_sensor_callback(void) {
     #endif
     #endif
 
-    Serial.println();
-
     targetDetector.update();
 
-    Serial.print("TARGET DETECTOR RUNNING | confidence=");
-    Serial.println(targetDetector.getTargetConfidence());
+    if (!robotStarted) {
+        target_navigation_active = false;
+        return;
+    }
+
+    const bool target_confirmed = targetDetector.isTargetConfirmed();
+    if (!target_confirmed) {
+        target_navigation_active = false;
+        return;
+    }
+
+    if (target_navigation_active) return;
+
+    const TieredTargetDetector::DetectionDebug& detection = targetDetector.getDebug();
+    GridPoint target_point;
+    if (detection.nearPairMatch && detection.nearAPoint.valid &&
+        detection.nearBPoint.valid) {
+        target_point.x = 0.5f * (detection.nearAPoint.x + detection.nearBPoint.x);
+        target_point.y = 0.5f * (detection.nearAPoint.y + detection.nearBPoint.y);
+        target_point.valid = true;
+    } else if (detection.farPairMatch && detection.farAPoint.valid &&
+               detection.farBPoint.valid) {
+        target_point.x = 0.5f * (detection.farAPoint.x + detection.farBPoint.x);
+        target_point.y = 0.5f * (detection.farAPoint.y + detection.farBPoint.y);
+        target_point.valid = true;
+    }
+
+    if (!target_point.valid) return;
+
+    // GridPoint uses +X right and +Y rear; MappingNav's pose uses
+    // +X forward and +Y left, with heading measured counter-clockwise.
+    const MappingNav::Pose2D pose = mappingNav.getPose();
+    const float forward_m = -target_point.y / 1000.0f;
+    const float left_m = -target_point.x / 1000.0f;
+    const float cos_heading = cosf(pose.theta_rad);
+    const float sin_heading = sinf(pose.theta_rad);
+    const float goal_x_m = pose.x_m + forward_m * cos_heading - left_m * sin_heading;
+    const float goal_y_m = pose.y_m + forward_m * sin_heading + left_m * cos_heading;
+    if (mappingNav.setGoalWorld(goal_x_m, goal_y_m)) {
+        target_navigation_active = true;
+    }
 }
 
 // Task wrapper for POI detector (processes ToF readings)
@@ -518,6 +566,14 @@ void poi_detector_callback(void) {
 
 // Task wrapper for ToF search planner (generates next search target)
 void tof_search_planner_callback(void) {
+    if (!robotStarted) return;
+
+    if (targetDetector.isTargetConfirmed()) {
+        target_navigation_active = true;
+        return;
+    }
+    if (target_navigation_active) target_navigation_active = false;
+
     // Check if search is complete
     if (searchPlanner.isSearchComplete(tofCoverageMap, mappingNav)) {
         // Search complete; no new targets needed
@@ -533,13 +589,55 @@ void tof_search_planner_callback(void) {
     uint16_t candidate_count = searchPlanner.generateCandidates(
         current_pose, tofCoverageMap, mappingNav, candidates, MAX_CANDIDATES);
     
-    // Select best candidate
-    int16_t best_idx = searchPlanner.selectBestCandidate(candidates, candidate_count);
+    // Prefer planner candidates whose destination is still uncovered and
+    // traversable. A tiny random tie-break avoids repeating the same route.
+    int16_t best_idx = -1;
+    float best_score = -1.0e9f;
+    for (uint16_t i = 0; i < candidate_count; ++i) {
+        const uint16_t cell_x = (uint16_t)(candidates[i].x_m / MappingNav::CELL_SIZE_M);
+        const uint16_t cell_y = (uint16_t)(candidates[i].y_m / MappingNav::CELL_SIZE_M);
+        if (cell_x >= MappingNav::GRID_WIDTH || cell_y >= MappingNav::GRID_HEIGHT) continue;
+        const uint16_t cell_idx = cell_y * MappingNav::GRID_WIDTH + cell_x;
+        if (tofCoverageMap.isCellCovered(cell_idx) ||
+            mappingNav.getOccupancy(cell_idx) == MappingNav::OCC_OCCUPIED ||
+            !candidates[i].is_useful) continue;
+
+        const float score = candidates[i].utility_score + random(0, 100) * 0.001f;
+        if (score > best_score) {
+            best_score = score;
+            best_idx = (int16_t)i;
+        }
+    }
+
+    // If local planner candidates do not land on an uncovered cell, make a
+    // bounded random search for one. This is at most 32 cell checks per 500 ms.
     if (best_idx < 0) {
-        // No useful candidates available
+        const uint16_t current_x = (uint16_t)(current_pose.x_m / MappingNav::CELL_SIZE_M);
+        const uint16_t current_y = (uint16_t)(current_pose.y_m / MappingNav::CELL_SIZE_M);
+        uint16_t best_cell = MappingNav::NUM_CELLS;
+        float best_distance = 1.0e9f;
+        for (uint8_t attempt = 0; attempt < 32; ++attempt) {
+            const uint16_t cell_idx = (uint16_t)random(MappingNav::NUM_CELLS);
+            if (tofCoverageMap.isCellCovered(cell_idx) ||
+                mappingNav.getOccupancy(cell_idx) == MappingNav::OCC_OCCUPIED) continue;
+            const uint16_t cell_x = cell_idx % MappingNav::GRID_WIDTH;
+            const uint16_t cell_y = cell_idx / MappingNav::GRID_WIDTH;
+            const float dx = (float)cell_x - current_x;
+            const float dy = (float)cell_y - current_y;
+            const float distance_score = dx * dx + dy * dy + random(0, 100) * 0.01f;
+            if (distance_score < best_distance) {
+                best_distance = distance_score;
+                best_cell = cell_idx;
+            }
+        }
+        if (best_cell < MappingNav::NUM_CELLS) {
+            const uint16_t cell_x = best_cell % MappingNav::GRID_WIDTH;
+            const uint16_t cell_y = best_cell / MappingNav::GRID_WIDTH;
+            mappingNav.setGoalWorld((cell_x + 0.5f) * MappingNav::CELL_SIZE_M,
+                                    (cell_y + 0.5f) * MappingNav::CELL_SIZE_M);
+        }
         return;
     }
-    
     // Extract best candidate pose
     SearchCandidate &best = candidates[best_idx];
     
@@ -619,8 +717,84 @@ void dc_motor_callback(void) {
         return;
     }
 
-    int16_t left_target = cmd_left_motor;
-    int16_t right_target = cmd_right_motor;
+    int16_t left_target = 0;
+    int16_t right_target = 0;
+
+    if (manual_motor_control_enabled) {
+        autonomous_scan_active = false;
+        left_target = cmd_left_motor;
+        right_target = cmd_right_motor;
+    } else {
+        const unsigned long now = millis();
+        const MappingNav::Pose2D pose = mappingNav.getPose();
+
+        if (targetDetector.isTargetConfirmed()) {
+            autonomous_last_scan_ms = now;
+            autonomous_scan_active = false;
+            target_navigation_active = true;
+        }
+
+        if (autonomous_scan_active ||
+            (!target_navigation_active &&
+             now - autonomous_last_scan_ms >= AUTONOMOUS_SCAN_INTERVAL_MS)) {
+            if (!autonomous_scan_active) {
+                autonomous_scan_active = true;
+                autonomous_scan_start_ms = now;
+                autonomous_scan_last_heading_rad = pose.theta_rad;
+                autonomous_scan_rotation_rad = 0.0f;
+            }
+
+            float heading_delta = pose.theta_rad - autonomous_scan_last_heading_rad;
+            if (heading_delta > PI) heading_delta -= 2.0f * PI;
+            if (heading_delta < -PI) heading_delta += 2.0f * PI;
+            autonomous_scan_rotation_rad += fabsf(heading_delta);
+            autonomous_scan_last_heading_rad = pose.theta_rad;
+
+            if (autonomous_scan_rotation_rad >= AUTONOMOUS_SCAN_TARGET_RAD ||
+                now - autonomous_scan_start_ms >= AUTONOMOUS_SCAN_TIMEOUT_MS) {
+                autonomous_scan_active = false;
+                autonomous_last_scan_ms = now;
+            } else {
+                // Left track backward and right track forward rotates in place.
+                left_target = -AUTONOMOUS_SCAN_SPEED;
+                right_target = AUTONOMOUS_SCAN_SPEED;
+            }
+        } else {
+            // Follow a short look-ahead point on the existing MappingNav path.
+            MappingNav::CellCoord path[8];
+            const uint16_t path_count = mappingNav.getPathCells(path, 8);
+            if (path_count > 1) {
+                const MappingNav::CellCoord &lookahead = path[path_count - 1];
+                const float goal_x_m = (lookahead.x + 0.5f) * MappingNav::CELL_SIZE_M;
+                const float goal_y_m = (lookahead.y + 0.5f) * MappingNav::CELL_SIZE_M;
+                const float desired_heading = atan2f(goal_y_m - pose.y_m,
+                                                     goal_x_m - pose.x_m);
+                float heading_error = desired_heading - pose.theta_rad;
+                if (heading_error > PI) heading_error -= 2.0f * PI;
+                if (heading_error < -PI) heading_error += 2.0f * PI;
+
+                if (fabsf(heading_error) > 0.9f) {
+                    const int16_t turn_speed = 26;
+                    if (heading_error > 0.0f) {
+                        left_target = -turn_speed;
+                        right_target = turn_speed;
+                    } else {
+                        left_target = turn_speed;
+                        right_target = -turn_speed;
+                    }
+                } else {
+                    const int16_t forward_speed = 32;
+                    const int16_t correction = (int16_t)constrain(
+                        (int)(heading_error * 18.0f), -12, 12);
+                    left_target = forward_speed - correction;
+                    right_target = forward_speed + correction;
+                }
+            }
+        }
+    }
+
+    cmd_left_motor = left_target;
+    cmd_right_motor = right_target;
 
     // Smoothly approach targets to avoid abrupt jumps and harsh reversals.
     // This ensures transitions like full straight -> full left are gradual.
@@ -1020,6 +1194,10 @@ void checkStartButton() {
                 // Reset mapping
                 mappingNav.reset();
                 setRobotStartPosition();
+                tofCoverageMap.reset();
+                target_navigation_active = false;
+                autonomous_scan_active = false;
+                autonomous_last_scan_ms = now;
 
                 // Reset RoboSLAM odometry/state
                 roboSlam.begin();
@@ -1328,7 +1506,7 @@ void task_init() {
     //taskManager.addTask(tBT_stream_test);  // Disabled for control reliability
     taskManager.addTask(tOpticalFlow);        //reading optical flow sensor
     taskManager.addTask(tLD06_lidar);          //reading LD06 lidar
-    taskManager.addTask(tLidarFrontTest);
+    // taskManager.addTask(tLidarFrontTest); // Disabled to avoid debug spam.
     // taskManager.addTask(tLocalisation);        //sensor fusion localisation update
     taskManager.addTask(tPosePrediction);
     // taskManager.addTask(tPOI_Detector);        //POI detection from ToF
@@ -1338,7 +1516,7 @@ void task_init() {
   tRead_ultrasonic.enable();
   tRead_infrared.enable();
   tRead_colour.enable();
-  //tRead_imu.enable();
+  tRead_imu.enable();
   //tProximity_sensor.enable();
   //tUltrasonic_sensor.enable();
   //tColor_sensor.enable();
@@ -1361,7 +1539,7 @@ void task_init() {
     //tBT_stream_test.enable();  // Disabled for control reliability
     tOpticalFlow.enable();
     tLD06_lidar.enable();
-    tLidarFrontTest.enable();
+    // tLidarFrontTest.enable(); // Disabled to avoid debug spam.
     tPosePrediction.enable();
     tPOI_Detector.enable();
     tToF_SearchPlanner.enable();
@@ -1410,7 +1588,11 @@ void send_robot_status_telemetry()
 
         goal_cell,
 
-        mappingNav.getPathLength()
+        mappingNav.getPathLength(),
+
+        robotStarted,
+        digitalRead(START_BUTTON_PIN) == LOW,
+        target_navigation_active
     );
 }
 //**********************************************************************************

@@ -527,7 +527,10 @@ void telemetry_send_status(
     float right_rpm,
     bool planner_goal_set,
     uint16_t goal_cell,
-    uint16_t path_length)
+    uint16_t path_length,
+    bool robot_started,
+    bool start_button_pressed,
+    bool target_navigation_active)
 {
     /*
      * STATUS packet 0x07
@@ -543,11 +546,14 @@ void telemetry_send_status(
      * 14      planner goal set
      * 15-16   goal cell
      * 17-18   path length
+     * 19      robot started
+     * 20      D25 start button pressed
+     * 21      target navigation active
      *
-     * Total = 19 bytes
+     * Total = 22 bytes
      */
 
-    const uint16_t payload_len = 19;
+    const uint16_t payload_len = 22;
 
     uint8_t payload[payload_len];
 
@@ -622,6 +628,10 @@ void telemetry_send_status(
 
     payload[18] =
         (uint8_t)((path_length >> 8) & 0xFF);
+
+    payload[19] = robot_started ? 1 : 0;
+    payload[20] = start_button_pressed ? 1 : 0;
+    payload[21] = target_navigation_active ? 1 : 0;
 
     send_frame(
         1,

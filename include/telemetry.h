@@ -30,7 +30,10 @@ void telemetry_send_status(
     float right_rpm,
     bool planner_goal_set,
     uint16_t goal_cell,
-    uint16_t path_length
+    uint16_t path_length,
+    bool robot_started,
+    bool start_button_pressed,
+    bool target_navigation_active
 );
 
 void telemetry_send_localisation_debug(

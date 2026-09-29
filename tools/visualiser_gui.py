@@ -144,6 +144,9 @@ class TelemetryState:
     planner_goal_set: bool = False
     goal_cell: int = 0
     status_path_length: int = 0
+    robot_started: Optional[bool] = None
+    start_button_pressed: Optional[bool] = None
+    target_navigation_active: bool = False
     lidar_diag: Optional[dict] = None
 
         # Localisation diagnostics
@@ -754,7 +757,7 @@ class TelemetryReconstructor:
         return True
 
     def status(self, payload):
-        if len(payload) != 19:
+        if len(payload) not in (19, 22):
             return False
         (self.state.start_side, self.state.sensor_flags,
          self.state.motor_left, self.state.motor_right,
@@ -762,6 +765,10 @@ class TelemetryReconstructor:
          goal_set, self.state.goal_cell,
          self.state.status_path_length) = struct.unpack("<BBhhffBHH", payload)
         self.state.planner_goal_set = bool(goal_set)
+        if len(payload) == 22:
+            self.state.robot_started = bool(payload[19])
+            self.state.start_button_pressed = bool(payload[20])
+            self.state.target_navigation_active = bool(payload[21])
         return True
 
 
@@ -1026,6 +1033,9 @@ class SerialWorker(threading.Thread):
             planner_goal_set=state.planner_goal_set,
             goal_cell=state.goal_cell,
             status_path_length=state.status_path_length,
+            robot_started=state.robot_started,
+            start_button_pressed=state.start_button_pressed,
+            target_navigation_active=state.target_navigation_active,
             lidar_diag=(None if state.lidar_diag is None else dict(state.lidar_diag)),
 
                         encoder_left_delta_m=(
@@ -1631,6 +1641,15 @@ class RoboCupVisualizer(QMainWindow):
             self.goal_item
         )
 
+        self.target_item = pg.ScatterPlotItem(
+            size=24,
+            symbol="star",
+            brush=pg.mkBrush("#ff4d6d"),
+            pen=pg.mkPen("#ffffff", width=1),
+        )
+
+        self.plot.addItem(self.target_item)
+
         # ----------------------------------------------------
         # SERIAL
         # ----------------------------------------------------
@@ -1760,6 +1779,7 @@ class RoboCupVisualizer(QMainWindow):
         self.goal_item.setVisible(
             self.show_goal
         )
+        self.target_item.setVisible(self.show_goal)
 
     def toggle_heading(self):
 
@@ -1879,6 +1899,7 @@ class RoboCupVisualizer(QMainWindow):
         # Clear start/goal markers
         self.start_item.clear()
         self.goal_item.clear()
+        self.target_item.clear()
 
         # Reset status displays
         self.robot_label.setText(
@@ -2142,12 +2163,27 @@ class RoboCupVisualizer(QMainWindow):
         # GOAL
         # ----------------------------------------------------
 
+        if (state.planner_goal_set and
+                0 <= state.goal_cell < state.grid_w * state.grid_h):
+            self.goal = (
+                ((state.goal_cell % state.grid_w) + 0.5) * state.cell_mm / 1000.0,
+                ((state.goal_cell // state.grid_w) + 0.5) * state.cell_mm / 1000.0,
+            )
+
         if self.goal is not None:
 
             self.goal_item.setData(
                 [self.goal[0]],
                 [self.goal[1]],
             )
+
+        if (state.target_navigation_active and
+                0 <= state.goal_cell < state.grid_w * state.grid_h):
+            target_x = ((state.goal_cell % state.grid_w) + 0.5) * state.cell_mm / 1000.0
+            target_y = ((state.goal_cell // state.grid_w) + 0.5) * state.cell_mm / 1000.0
+            self.target_item.setData([target_x], [target_y])
+        else:
+            self.target_item.clear()
 
         # ----------------------------------------------------
         # TRAIL
@@ -2373,9 +2409,18 @@ class RoboCupVisualizer(QMainWindow):
                 f"RIGHT: {state.motor_right:5d} ({state.right_rpm:6.1f} RPM)"
             )
             goal = str(state.goal_cell) if state.planner_goal_set else "--"
+            start_button = (
+                "PRESSED" if state.start_button_pressed else "RELEASED"
+            ) if state.start_button_pressed is not None else "--"
+            robot_state = (
+                "RUNNING" if state.robot_started else "STOPPED"
+            ) if state.robot_started is not None else "--"
+            target_cell = str(state.goal_cell) if state.target_navigation_active else "--"
             self.planner_label.setText(
-                f"STATE: {'FOLLOWING' if state.planner_goal_set else 'IDLE'}\n"
+                f"START BTN: {start_button} | ROBOT: {robot_state}\n"
+                f"STATE: {'TARGET' if state.target_navigation_active else ('FOLLOWING' if state.planner_goal_set else 'IDLE')}\n"
                 f"GOAL CELL: {goal}\n"
+                f"TARGET CELL: {target_cell}\n"
                 f"PATH: {state.status_path_length} cells\n"
                 f"GRID: {state.grid_w} x {state.grid_h}"
             )
