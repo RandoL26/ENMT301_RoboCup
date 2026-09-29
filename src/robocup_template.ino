@@ -184,7 +184,6 @@ bool telemetry_imu_ok = false;
 bool telemetry_tof_ok = false;
 bool telemetry_optical_flow_ok = false;
 bool telemetry_ultrasonic_ok = false;
-bool binary_telemetry_active = OPTICAL_FLOW_SERIAL_TEST;
 
 
 bool robotStarted = false;
@@ -371,7 +370,6 @@ void optical_flow_callback(void) {
                     totalX, totalY);
         #endif
         // Update localisation with optical flow
-        localisation.updateOpticalFlow(opticalFlow);
     }
 }
 
@@ -413,7 +411,6 @@ void lidar_front_test_callback(void) {
 // Task wrapper for localisation sensor fusion update
 void localisation_update_callback(void) {
     // Perform sensor fusion (prediction from IMU + flow)
-    localisation.updateFromSensors();
     
     // Optional: print diagnostics periodically (every 1000 ms)
     static unsigned long last_diag_print = 0;
@@ -422,17 +419,7 @@ void localisation_update_callback(void) {
         last_diag_print = now;
         
         // Print fused localisation state
-        RobotPose pose = localisation.getPose();
-        LocalisationDiags diags = localisation.getDiags();
-        #if LOCALISATION_DEBUG
-        printfBoth("LOCALISATION: x=%.1f mm, y=%.1f mm, theta=%.3f rad | "
-                   "flow: dx=%.1f, dy=%.1f | "
-                   "lidar_match=%u, accepted=%u, frames=%lu\n",
-                   pose.x_mm, pose.y_mm, pose.theta_rad,
-                   diags.flow_dx_mm, diags.flow_dy_mm,
-                   diags.lidar_match_score, diags.lidar_correction_accepted,
-                   diags.frame_count);
-        #endif
+        
     }
 // 100 Hz authoritative pose prediction task
 void pose_prediction_callback(void) {
@@ -500,7 +487,6 @@ void poi_detector_callback(void) {
         float tof_distance_m = (tofData.sensorCount > 0) ? (tofData.distances[0] / 1000.0f) : 0.0f;
         
         // Update POI detector with fused pose and occupancy map
-        poiDetector.update(localisation, mappingNav, tof_distance_m);
         
         // Update ToF coverage map if reading is valid
         if (tof_distance_m > 0.0f) {
