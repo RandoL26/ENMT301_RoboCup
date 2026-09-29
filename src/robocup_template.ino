@@ -1195,6 +1195,16 @@ void robot_init() {
         targetConfig.lidarMatchToleranceMm = 40;
         targetConfig.lidarBearingToleranceDeg = 1.0f;
         targetConfig.useAngleGate = false;
+
+        // Separate LiDAR obstacle required before ToF target tracking can start.
+        targetConfig.lidarObstacleMinMm = 80;
+        targetConfig.lidarObstacleMaxMm = 700;
+        targetConfig.minimumSeparateLidarPoints = 3;
+        targetConfig.separateObstacleDistanceMm = 100;
+        targetConfig.lidarClusterRadiusMm = 80;
+        targetConfig.useSeparateObstacleAngleGate = true;
+        targetConfig.separateObstacleAngleMinDeg = -90.0f;
+        targetConfig.separateObstacleAngleMaxDeg = 90.0f;
         targetDetector.setConfig(targetConfig);
 
     // Initialize optional DFRobot Matrix Lidar (8x8 matrix) if connected
