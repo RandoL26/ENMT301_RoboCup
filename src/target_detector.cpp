@@ -5,14 +5,13 @@ namespace {
 constexpr float LIDAR_X_MM = 38.0f;
 constexpr float LIDAR_Y_MM = -96.0f;
 
-// LD06's existing coordinate frame:
-// 0° = +X, 90° = -Y
+// LD06 angle correction used by the existing detector.
 //
-// Robot detector frame:
-// 0° = front (-Y), +90° = right (+X)
-//
-// Therefore the robot-frame angle is:
-// robotAngle = LD06 angle - 90°
+// Robot frame:
+//   0°   = FRONT (-Y)
+//   +90° = RIGHT (+X)
+//   -90° = LEFT (-X)
+constexpr float LIDAR_YAW_OFFSET_DEG = 37.5f;
 
 float angleDiffDeg(float aDeg, float bDeg) {
     float d = fmodf(aDeg - bDeg + 540.0f, 360.0f) - 180.0f;
@@ -21,12 +20,18 @@ float angleDiffDeg(float aDeg, float bDeg) {
 
 } // namespace
 
-TieredTargetDetector::TieredTargetDetector(TOFSensorArray& sensorArray,
-                                           LD06& sensorLidar,
-                                           uint8_t nearAIndex,
-                                           uint8_t nearBIndex,
-                                           uint8_t farAIndex,
-                                           uint8_t farBIndex)
+
+// ===========================================================================
+// CONSTRUCTOR
+// ===========================================================================
+
+TieredTargetDetector::TieredTargetDetector(
+    TOFSensorArray& sensorArray,
+    LD06& sensorLidar,
+    uint8_t nearAIndex,
+    uint8_t nearBIndex,
+    uint8_t farAIndex,
+    uint8_t farBIndex)
     : tofArray(sensorArray),
       lidar(sensorLidar),
       sensorNearA(nearAIndex),
@@ -35,16 +40,36 @@ TieredTargetDetector::TieredTargetDetector(TOFSensorArray& sensorArray,
       sensorFarB(farBIndex),
       lastResult(TierDetectionResult::None) {
 
-    mountFarA = SensorMount{-86.0f, -140.0f, 11.20f};
-    mountFarB = SensorMount{ 90.0f, -126.0f, 12.95f};
+    // -----------------------------------------------------------------------
+    // TOF SENSOR MOUNTS
+    // -----------------------------------------------------------------------
 
-    mountNearA = SensorMount{-40.5f, -110.0f, 14.04f};
-    mountNearB = SensorMount{ 60.5f, -102.0f, 14.04f};
+    mountFarA =
+        SensorMount{-86.0f, -140.0f, 11.20f};
+
+    mountFarB =
+        SensorMount{90.0f, -126.0f, 12.95f};
+
+    mountNearA =
+        SensorMount{-40.5f, -110.0f, 14.04f};
+
+    mountNearB =
+        SensorMount{60.5f, -102.0f, 14.04f};
+
+
+    // -----------------------------------------------------------------------
+    // LIDAR POSITION
+    // -----------------------------------------------------------------------
 
     lidar.setOffsetPosition(
-    int16_t(LIDAR_X_MM),
-    int16_t(LIDAR_Y_MM),
-    0.0f);
+        int16_t(LIDAR_X_MM),
+        int16_t(LIDAR_Y_MM),
+        0.0f);
+
+
+    // -----------------------------------------------------------------------
+    // INITIAL STATE
+    // -----------------------------------------------------------------------
 
     debug = DetectionDebug{};
 
@@ -52,93 +77,181 @@ TieredTargetDetector::TieredTargetDetector(TOFSensorArray& sensorArray,
     targetLatched = false;
     movingObjectDetected = false;
 
-    trackingState = TargetTrackingState::NONE;
+    trackingState =
+        TargetTrackingState::NONE;
 
-    lastCandidatePoint = GridPoint{};
+    lastCandidatePoint =
+        GridPoint{};
+
     lastCandidateUpdateMs = 0;
+
+    lastCandidateWasFar = false;
 }
 
-void TieredTargetDetector::setConfig(const TieredTargetDetectorConfig& newConfig) {
+
+// ===========================================================================
+// CONFIGURATION
+// ===========================================================================
+
+void TieredTargetDetector::setConfig(
+    const TieredTargetDetectorConfig& newConfig) {
+
     config = newConfig;
 }
 
-void TieredTargetDetector::setExpectedIntersections(uint16_t nearMm, uint16_t farMm) {
-    // NOTE: this only updates the pairMatch() validation targets, same as
-    // before. It does NOT recompute sensor mount angles -- call
-    // setSensorMounts() (or SensorMount::aimedAtCenterlineCrossing() again
-    // yourself) if the physical crossing distance actually changed.
+
+void TieredTargetDetector::setExpectedIntersections(
+    uint16_t nearMm,
+    uint16_t farMm) {
+
     config.nearIntersectMm = nearMm;
     config.farIntersectMm = farMm;
 }
 
-void TieredTargetDetector::setSensorMounts(const SensorMount& nearA, const SensorMount& nearB,
-                                            const SensorMount& farA, const SensorMount& farB) {
+
+void TieredTargetDetector::setSensorMounts(
+    const SensorMount& nearA,
+    const SensorMount& nearB,
+    const SensorMount& farA,
+    const SensorMount& farB) {
+
     mountNearA = nearA;
     mountNearB = nearB;
     mountFarA = farA;
     mountFarB = farB;
 }
 
+
+void TieredTargetDetector::setLidarOffset(
+    float xMm,
+    float yMm,
+    float angleDeg) {
+
+    lidar.setOffsetPosition(
+        int16_t(xMm),
+        int16_t(yMm),
+        angleDeg);
+}
+
+
+// ===========================================================================
+// TOF RANGE -> ROBOT GRID
+// ===========================================================================
+
 GridPoint TieredTargetDetector::tofPointFromRange(
     const SensorMount& mount,
     uint16_t rangeMm) const {
-    // The detector frame uses +X to the robot's right and -Y toward the front.
-    const float angleRad = mount.boresightDeg * PI / 180.0f;
+
     GridPoint point;
-    point.x = mount.xMm + rangeMm * sinf(angleRad);
-    point.y = mount.yMm - rangeMm * cosf(angleRad);
+
+    const float angleRad =
+        mount.boresightDeg * PI / 180.0f;
+
+    point.x =
+        mount.xMm +
+        rangeMm * sinf(angleRad);
+
+    point.y =
+        mount.yMm -
+        rangeMm * cosf(angleRad);
+
     point.valid = true;
+
     return point;
 }
 
-void TieredTargetDetector::setLidarOffset(float xMm, float yMm, float angleDeg) {
-    lidar.setOffsetPosition(int16_t(xMm), int16_t(yMm), angleDeg);
-}
+
+// ===========================================================================
+// MAIN UPDATE
+// ===========================================================================
 
 bool TieredTargetDetector::update() {
 
     if (!tofArray.isInitialized()) {
-        lastResult = TierDetectionResult::None;
-        trackingState = TargetTrackingState::NONE;
+
+        lastResult =
+            TierDetectionResult::None;
+
+        trackingState =
+            TargetTrackingState::NONE;
+
         targetLatched = false;
+        targetConfidence = 0;
+        movingObjectDetected = false;
+
         return false;
     }
 
-    // ============================================================
+
+    // =======================================================================
     // 1. READ TOF SENSORS
-    // ============================================================
+    // =======================================================================
 
-    uint16_t nearA = tofArray.getDistance(sensorNearA);
-    uint16_t nearB = tofArray.getDistance(sensorNearB);
-    uint16_t farA  = tofArray.getDistance(sensorFarA);
-    uint16_t farB  = tofArray.getDistance(sensorFarB);
+    uint16_t nearA =
+        tofArray.getDistance(sensorNearA);
 
-    if (!withinDetectionEnvelope(nearA)) nearA = INVALID_DISTANCE;
-    if (!withinDetectionEnvelope(nearB)) nearB = INVALID_DISTANCE;
-    if (!withinDetectionEnvelope(farA))  farA  = INVALID_DISTANCE;
-    if (!withinDetectionEnvelope(farB))  farB  = INVALID_DISTANCE;
+    uint16_t nearB =
+        tofArray.getDistance(sensorNearB);
 
-    // ============================================================
-    // 2. SAVE DEBUG DATA
-    // ============================================================
+    uint16_t farA =
+        tofArray.getDistance(sensorFarA);
+
+    uint16_t farB =
+        tofArray.getDistance(sensorFarB);
+
+
+    // Apply the configured ToF detection envelope.
+
+    if (!withinDetectionEnvelope(nearA))
+        nearA = INVALID_DISTANCE;
+
+    if (!withinDetectionEnvelope(nearB))
+        nearB = INVALID_DISTANCE;
+
+    if (!withinDetectionEnvelope(farA))
+        farA = INVALID_DISTANCE;
+
+    if (!withinDetectionEnvelope(farB))
+        farB = INVALID_DISTANCE;
+
+
+    // =======================================================================
+    // 2. SAVE BASIC DEBUG DATA
+    // =======================================================================
 
     debug.nearA = nearA;
     debug.nearB = nearB;
-    debug.farA  = farA;
-    debug.farB  = farB;
 
-    debug.nearAverage = averageDistance(nearA, nearB);
-    debug.farAverage  = averageDistance(farA, farB);
+    debug.farA = farA;
+    debug.farB = farB;
+
+    debug.nearAverage =
+        averageDistance(nearA, nearB);
+
+    debug.farAverage =
+        averageDistance(farA, farB);
+
+
+    // =======================================================================
+    // 3. TOF PAIR MATCHING
+    // =======================================================================
 
     debug.nearPairMatch =
-        pairMatch(nearA, nearB, config.nearIntersectMm);
+        pairMatch(
+            nearA,
+            nearB,
+            config.nearIntersectMm);
 
     debug.farPairMatch =
-        pairMatch(farA, farB, config.farIntersectMm);
+        pairMatch(
+            farA,
+            farB,
+            config.farIntersectMm);
 
-    // ============================================================
-    // 3. CONVERT TO ROBOT COORDINATES
-    // ============================================================
+
+    // =======================================================================
+    // 4. CONVERT TO ROBOT COORDINATES
+    // =======================================================================
 
     debug.nearAPoint =
         isDistanceValid(nearA)
@@ -160,15 +273,21 @@ bool TieredTargetDetector::update() {
         ? tofPointFromRange(mountFarB, farB)
         : GridPoint{};
 
+
     GridPoint nearTierPoint =
-        midpoint(debug.nearAPoint, debug.nearBPoint);
+        midpoint(
+            debug.nearAPoint,
+            debug.nearBPoint);
 
     GridPoint farTierPoint =
-        midpoint(debug.farAPoint, debug.farBPoint);
+        midpoint(
+            debug.farAPoint,
+            debug.farBPoint);
 
-    // ============================================================
-    // 4. LIDAR CORROBORATION
-    // ============================================================
+
+    // =======================================================================
+    // 5. LIDAR SAME-OBJECT CHECK
+    // =======================================================================
 
     debug.nearLidarConfirmsObstacle =
         debug.nearPairMatch &&
@@ -178,18 +297,22 @@ bool TieredTargetDetector::update() {
         debug.farPairMatch &&
         isObstacleAgainstLidar(farTierPoint);
 
+
     bool anyObstacle =
         debug.nearLidarConfirmsObstacle ||
         debug.farLidarConfirmsObstacle;
 
-    // ============================================================
-    // 5. STEERING
-    // ============================================================
+
+    // =======================================================================
+    // 6. STEERING
+    // =======================================================================
 
     debug.steeringActive = false;
     debug.steeringValue = 0.0f;
 
-    if (isDistanceValid(nearA) != isDistanceValid(nearB)) {
+
+    if (isDistanceValid(nearA) !=
+        isDistanceValid(nearB)) {
 
         const GridPoint& hit =
             isDistanceValid(nearA)
@@ -197,11 +320,17 @@ bool TieredTargetDetector::update() {
             : debug.nearBPoint;
 
         debug.steeringValue =
-            computeSteering(hit, mountNearA, mountNearB);
+            computeSteering(
+                hit,
+                mountNearA,
+                mountNearB);
 
         debug.steeringActive = true;
 
-    } else if (isDistanceValid(farA) != isDistanceValid(farB)) {
+    }
+
+    else if (isDistanceValid(farA) !=
+             isDistanceValid(farB)) {
 
         const GridPoint& hit =
             isDistanceValid(farA)
@@ -209,44 +338,107 @@ bool TieredTargetDetector::update() {
             : debug.farBPoint;
 
         debug.steeringValue =
-            computeSteering(hit, mountFarA, mountFarB);
+            computeSteering(
+                hit,
+                mountFarA,
+                mountFarB);
 
         debug.steeringActive = true;
     }
 
-    // ============================================================
-    // 6. CURRENT OBJECT DISTANCE
-    // ============================================================
 
-    if (debug.nearPairMatch && debug.farPairMatch) {
+    // =======================================================================
+    // 7. CURRENT OBJECT DISTANCE
+    // =======================================================================
+
+    if (debug.nearPairMatch &&
+        debug.farPairMatch) {
 
         debug.objectDistance =
             debug.nearAverage < debug.farAverage
             ? debug.nearAverage
             : debug.farAverage;
 
-    } else if (debug.nearPairMatch) {
-
-        debug.objectDistance = debug.nearAverage;
-
-    } else if (debug.farPairMatch) {
-
-        debug.objectDistance = debug.farAverage;
-
-    } else {
-
-        debug.objectDistance = INVALID_DISTANCE;
     }
 
-    // ============================================================
-    // 7. DETERMINE CURRENT CANDIDATE
-    // ============================================================
+    else if (debug.nearPairMatch) {
 
-    bool farCandidate = debug.farPairMatch;
-    bool nearCandidate = debug.nearPairMatch;
+        debug.objectDistance =
+            debug.nearAverage;
+
+    }
+
+    else if (debug.farPairMatch) {
+
+        debug.objectDistance =
+            debug.farAverage;
+
+    }
+
+    else {
+
+        debug.objectDistance =
+            INVALID_DISTANCE;
+    }
+
+
+    // =======================================================================
+    // 8. CURRENT TOF CANDIDATE
+    // =======================================================================
+
+    bool farCandidate =
+        debug.farPairMatch;
+
+    bool nearCandidate =
+        debug.nearPairMatch;
 
     bool tofCandidate =
-        farCandidate || nearCandidate;
+        farCandidate ||
+        nearCandidate;
+
+
+    // =======================================================================
+    // 9. SEPARATE LIDAR OBSTACLE
+    //
+    // This is NOT required for a ToF candidate.
+    //
+    // It simply provides additional target evidence.
+    // =======================================================================
+
+    bool separateLidarObstacle = false;
+
+    if (tofCandidate) {
+
+        const GridPoint& tofCandidatePoint =
+            nearCandidate
+            ? nearTierPoint
+            : farTierPoint;
+
+        separateLidarObstacle =
+            hasSeparateLidarObstacle(
+                tofCandidatePoint);
+    }
+
+    debug.separateLidarObstacle =
+        separateLidarObstacle;
+
+
+    // =======================================================================
+    // 10. CURRENT CANDIDATE
+    //
+    // IMPORTANT:
+    //
+    // A valid ToF pair is enough to create a candidate.
+    //
+    // LiDAR is additional evidence:
+    //
+    //   Same object     -> obstacle evidence
+    //   Separate object -> target evidence
+    //   Nothing         -> no additional evidence
+    // =======================================================================
+
+    bool currentCandidate =
+        tofCandidate;
 
     // A ToF pair match alone is NOT enough to start target tracking.
     // The LiDAR must see a separate physical object as well.
@@ -269,19 +461,26 @@ bool TieredTargetDetector::update() {
 
     GridPoint currentCandidatePoint;
 
-    if (targetCandidate) {
+    if (currentCandidate) {
+
         currentCandidatePoint =
-            nearCandidate ? nearTierPoint : farTierPoint;
+            nearCandidate
+            ? nearTierPoint
+            : farTierPoint;
     }
 
-    uint32_t now = millis();
 
-    // ============================================================
-    // 8. CHECK TEMPORAL POSITION CONSISTENCY
-    // ============================================================
+    uint32_t now =
+        millis();
+
+
+    // =======================================================================
+    // 11. TEMPORAL POSITION CONSISTENCY
+    // =======================================================================
 
     bool positionConsistent = false;
     bool largeMovement = false;
+
 
     if (currentCandidate &&
         currentCandidatePoint.valid &&
@@ -290,7 +489,9 @@ bool TieredTargetDetector::update() {
         uint32_t elapsed =
             now - lastCandidateUpdateMs;
 
-        if (elapsed <= config.candidateTimeoutMs) {
+
+        if (elapsed <=
+            config.candidateTimeoutMs) {
 
             float dx =
                 currentCandidatePoint.x -
@@ -301,10 +502,15 @@ bool TieredTargetDetector::update() {
                 lastCandidatePoint.y;
 
             float movement =
-                sqrtf(dx * dx + dy * dy);
+                sqrtf(
+                    dx * dx +
+                    dy * dy);
+
 
             positionConsistent =
-                movement <= float(config.positionToleranceMm);
+                movement <=
+                float(config.positionToleranceMm);
+
 
             largeMovement =
                 movement >=
@@ -312,11 +518,13 @@ bool TieredTargetDetector::update() {
         }
     }
 
-    // ============================================================
-    // 9. CHECK FAR -> NEAR GEOMETRY
-    // ============================================================
+
+    // =======================================================================
+    // 12. FAR -> NEAR GEOMETRY
+    // =======================================================================
 
     bool farNearConsistent = false;
+
 
     if (farCandidate &&
         nearCandidate &&
@@ -329,16 +537,26 @@ bool TieredTargetDetector::update() {
         float nearDistance =
             nearTierPoint.distanceFromOrigin();
 
+
         float expectedChange =
-            float(config.farIntersectMm -
-                  config.nearIntersectMm);
+            float(
+                config.farIntersectMm -
+                config.nearIntersectMm);
+
 
         float actualChange =
-            farDistance - nearDistance;
+            farDistance -
+            nearDistance;
+
 
         bool distanceConsistent =
-            fabsf(actualChange - expectedChange)
-            <= float(config.approachingDistanceToleranceMm);
+            fabsf(
+                actualChange -
+                expectedChange)
+            <=
+            float(
+                config.approachingDistanceToleranceMm);
+
 
         float farBearing =
             farTierPoint.bearingFromOriginDeg();
@@ -346,58 +564,192 @@ bool TieredTargetDetector::update() {
         float nearBearing =
             nearTierPoint.bearingFromOriginDeg();
 
+
         float bearingDifference =
-            fabsf(angleDiffDeg(
-                farBearing,
-                nearBearing));
+            fabsf(
+                angleDiffDeg(
+                    farBearing,
+                    nearBearing));
+
 
         bool bearingConsistent =
             bearingDifference <= 15.0f;
+
 
         farNearConsistent =
             distanceConsistent &&
             bearingConsistent;
     }
 
-    // ============================================================
-    // 10. MOVING OBJECT DETECTION
-    // ============================================================
+
+    // =======================================================================
+    // 13. MOVEMENT DETECTION
+    // =======================================================================
+
+    debug.positionConsistent = positionConsistent;
+    debug.farNearConsistent = farNearConsistent;
+    debug.largeMovement = largeMovement;
 
     if (largeMovement) {
         movingObjectDetected = true;
     }
 
-    // ============================================================
-    // 11. SAME-OBJECT OBSTACLE OVERRIDES TARGET TRACKING
-    // ============================================================
 
-    if (anyObstacle) {
-        targetConfidence = 0;
-        targetLatched = false;
-        movingObjectDetected = false;
-        trackingState = TargetTrackingState::NONE;
-        lastCandidatePoint = GridPoint{};
+    // =======================================================================
+    // 14. CONFIDENCE UPDATE
+    //
+    // Formula:
+    //
+    //   new confidence =
+    //       old confidence
+    //       - natural decay
+    //       + ToF evidence
+    //       + temporal evidence
+    //       + separate LiDAR evidence
+    //       - same-object penalty
+    //       - movement penalty
+    //
+    // No LiDAR return gives NO penalty.
+    // =======================================================================
+
+    if (currentCandidate) {
+
+        // -------------------------------------------------------------------
+        // Natural confidence decay
+        // -------------------------------------------------------------------
+
+        if (targetConfidence >=
+            config.confidenceDecay) {
+
+            targetConfidence -=
+                config.confidenceDecay;
+
+        } else {
+
+            targetConfidence = 0;
+        }
+
+
+        // -------------------------------------------------------------------
+        // ToF evidence
+        //
+        // Near takes priority over far.
+        // -------------------------------------------------------------------
+
+        if (nearCandidate) {
+
+            targetConfidence +=
+                config.nearDetectionConfidence;
+
+        }
+
+        else if (farCandidate) {
+
+            targetConfidence +=
+                config.farDetectionConfidence;
+        }
+
+
+        // -------------------------------------------------------------------
+        // Temporal evidence
+        // -------------------------------------------------------------------
+
+        if (positionConsistent) {
+
+            targetConfidence +=
+                config.positionConsistencyConfidence;
+        }
+
+
+        if (farNearConsistent) {
+
+            targetConfidence +=
+                config.positionConsistencyConfidence;
+        }
+
+
+        // -------------------------------------------------------------------
+        // Separate LiDAR evidence
+        //
+        // This is positive target evidence.
+        // -------------------------------------------------------------------
+
+        if (separateLidarObstacle &&
+            !anyObstacle) {
+
+            targetConfidence +=
+                config.lidarConfidence;
+        }
+
+
+        // -------------------------------------------------------------------
+        // Same-object LiDAR
+        //
+        // This is contradictory target evidence.
+        // -------------------------------------------------------------------
+
+        if (anyObstacle) {
+
+            if (targetConfidence >=
+                config.sameObjectPenalty) {
+
+                targetConfidence -=
+                    config.sameObjectPenalty;
+
+            } else {
+
+                targetConfidence = 0;
+            }
+        }
+
+
+        // -------------------------------------------------------------------
+        // Moving object
+        // -------------------------------------------------------------------
+
+        if (largeMovement) {
+
+            if (targetConfidence >=
+                config.movingObjectPenalty) {
+
+                targetConfidence -=
+                    config.movingObjectPenalty;
+
+            } else {
+
+                targetConfidence = 0;
+            }
+        }
+
+
+        // -------------------------------------------------------------------
+        // Clamp confidence
+        // -------------------------------------------------------------------
+
+        if (targetConfidence > 100) {
+            targetConfidence = 100;
+        }
     }
 
-    // ============================================================
-    // 12. STATE MACHINE
-    // ============================================================
+
+    // =======================================================================
+    // 15. STATE MACHINE
+    // =======================================================================
 
     switch (trackingState) {
 
-        // --------------------------------------------------------
+
+        // ===================================================================
         // NONE
-        // --------------------------------------------------------
+        // ===================================================================
 
         case TargetTrackingState::NONE:
 
             targetLatched = false;
             movingObjectDetected = false;
 
-            if (farCandidate) {
 
-                targetConfidence =
-                    config.farDetectionConfidence;
+            if (farCandidate) {
 
                 trackingState =
                     TargetTrackingState::FAR_CANDIDATE;
@@ -405,15 +757,14 @@ bool TieredTargetDetector::update() {
                 lastCandidatePoint =
                     farTierPoint;
 
-                lastCandidateUpdateMs = now;
+                lastCandidateUpdateMs =
+                    now;
+
+                lastCandidateWasFar = true;
             }
 
-            else if (nearCandidate) {
 
-                // Seeing something only in the near tier is not
-                // enough to immediately call it a target.
-                targetConfidence =
-                    config.nearDetectionConfidence;
+            else if (nearCandidate) {
 
                 trackingState =
                     TargetTrackingState::NEAR_CONFIRMING;
@@ -421,36 +772,44 @@ bool TieredTargetDetector::update() {
                 lastCandidatePoint =
                     nearTierPoint;
 
-                lastCandidateUpdateMs = now;
+                lastCandidateUpdateMs =
+                    now;
+
+                lastCandidateWasFar = false;
             }
 
             break;
 
 
-        // --------------------------------------------------------
+        // ===================================================================
         // FAR CANDIDATE
-        // --------------------------------------------------------
+        // ===================================================================
 
         case TargetTrackingState::FAR_CANDIDATE:
 
             if (!currentCandidate) {
 
-                if ((now - lastCandidateUpdateMs) >
+                if ((now -
+                     lastCandidateUpdateMs) >
                     config.candidateTimeoutMs) {
 
                     targetConfidence = 0;
+
                     trackingState =
                         TargetTrackingState::NONE;
 
-                    lastCandidatePoint = GridPoint{};
+                    lastCandidatePoint =
+                        GridPoint{};
                 }
 
                 break;
             }
 
+
             if (largeMovement) {
 
                 targetConfidence = 0;
+
                 movingObjectDetected = true;
 
                 trackingState =
@@ -459,67 +818,65 @@ bool TieredTargetDetector::update() {
                 break;
             }
 
-            if (positionConsistent) {
 
-                targetConfidence +=
-                    config.positionConsistencyConfidence;
-
-            } else {
-
-                targetConfidence +=
-                    config.farDetectionConfidence;
-            }
-
-            if (targetConfidence > 100)
-                targetConfidence = 100;
-
-            // If the near pair has now appeared, we have progressed
-            // from FAR toward NEAR.
-            if (nearCandidate) {
-
-                trackingState =
-                    TargetTrackingState::NEAR_CONFIRMING;
-            }
-
-            else if (targetConfidence >=
-                     config.approachingThreshold) {
+            // Once confidence has reached the approaching threshold,
+            // progress to APPROACHING.
+            if (targetConfidence >=
+                config.approachingThreshold) {
 
                 trackingState =
                     TargetTrackingState::APPROACHING;
             }
 
+
+            // A near pair immediately moves us toward confirmation.
+            if (nearCandidate) {
+
+                trackingState =
+                    TargetTrackingState::NEAR_CONFIRMING;
+
+                lastCandidateWasFar = false;
+            }
+
+
             lastCandidatePoint =
                 currentCandidatePoint;
 
-            lastCandidateUpdateMs = now;
+            lastCandidateUpdateMs =
+                now;
 
             break;
 
 
-        // --------------------------------------------------------
+        // ===================================================================
         // APPROACHING
-        // --------------------------------------------------------
+        // ===================================================================
 
         case TargetTrackingState::APPROACHING:
 
             if (!currentCandidate) {
 
-                if ((now - lastCandidateUpdateMs) >
+                if ((now -
+                     lastCandidateUpdateMs) >
                     config.candidateTimeoutMs) {
 
                     targetConfidence = 0;
+
                     trackingState =
                         TargetTrackingState::NONE;
 
-                    lastCandidatePoint = GridPoint{};
+                    lastCandidatePoint =
+                        GridPoint{};
                 }
 
                 break;
             }
 
+
             if (largeMovement) {
 
                 targetConfidence = 0;
+
                 movingObjectDetected = true;
 
                 trackingState =
@@ -528,64 +885,57 @@ bool TieredTargetDetector::update() {
                 break;
             }
 
-            if (positionConsistent) {
 
-                targetConfidence +=
-                    config.positionConsistencyConfidence;
-            }
-
-            if (farNearConsistent) {
-
-                targetConfidence +=
-                    config.positionConsistencyConfidence;
+            // Far -> near progression.
+            if (farNearConsistent ||
+                nearCandidate) {
 
                 trackingState =
                     TargetTrackingState::NEAR_CONFIRMING;
+
+                lastCandidateWasFar = false;
             }
 
-            if (nearCandidate) {
-
-                trackingState =
-                    TargetTrackingState::NEAR_CONFIRMING;
-            }
-
-            if (targetConfidence > 100)
-                targetConfidence = 100;
 
             lastCandidatePoint =
                 currentCandidatePoint;
 
-            lastCandidateUpdateMs = now;
+            lastCandidateUpdateMs =
+                now;
 
             break;
 
 
-        // --------------------------------------------------------
+        // ===================================================================
         // NEAR CONFIRMING
-        // --------------------------------------------------------
+        // ===================================================================
 
         case TargetTrackingState::NEAR_CONFIRMING: {
 
             if (!nearCandidate) {
 
-                // Don't immediately throw away the candidate.
                 // Allow a short ToF dropout.
-                if ((now - lastCandidateUpdateMs) >
+                if ((now -
+                     lastCandidateUpdateMs) >
                     config.candidateTimeoutMs) {
 
                     targetConfidence = 0;
+
                     trackingState =
                         TargetTrackingState::NONE;
 
-                    lastCandidatePoint = GridPoint{};
+                    lastCandidatePoint =
+                        GridPoint{};
                 }
 
                 break;
             }
 
+
             if (largeMovement) {
 
                 targetConfidence = 0;
+
                 movingObjectDetected = true;
 
                 trackingState =
@@ -594,37 +944,30 @@ bool TieredTargetDetector::update() {
                 break;
             }
 
-            // Near pair is strong evidence.
-            targetConfidence +=
-                config.nearDetectionConfidence;
 
-            if (positionConsistent) {
-
-                targetConfidence +=
-                    config.positionConsistencyConfidence;
-            }
-
-            if (farNearConsistent) {
-
-                targetConfidence +=
-                    config.positionConsistencyConfidence;
-            }
-
-            if (targetConfidence > 100)
-                targetConfidence = 100;
-
-            // Require the candidate to actually be in the
-            // near region before final confirmation.
             float nearDistance =
                 nearTierPoint.distanceFromOrigin();
 
+
             bool insideNearRegion =
                 nearDistance <=
-                float(config.nearConfirmationDistanceMm);
+                float(
+                    config.nearConfirmationDistanceMm);
 
+
+            // Final confirmation requires:
+            //
+            //   1. Near ToF pair
+            //   2. Correct physical near region
+            //   3. Sufficient confidence
+            //   4. LiDAR must NOT identify the same object
+            //   5. Object must NOT be moving
+            //
             if (insideNearRegion &&
                 targetConfidence >=
-                config.nearConfirmThreshold) {
+                    config.nearConfirmThreshold &&
+                !anyObstacle &&
+                !largeMovement) {
 
                 trackingState =
                     TargetTrackingState::TARGET_CONFIRMED;
@@ -632,27 +975,33 @@ bool TieredTargetDetector::update() {
                 targetLatched = true;
             }
 
+
             lastCandidatePoint =
                 currentCandidatePoint;
 
-            lastCandidateUpdateMs = now;
+            lastCandidateUpdateMs =
+                now;
 
             break;
         }
 
 
-        // --------------------------------------------------------
+        // ===================================================================
         // TARGET CONFIRMED
-        // --------------------------------------------------------
+        // ===================================================================
 
         case TargetTrackingState::TARGET_CONFIRMED:
 
             targetLatched = true;
 
+
+            // If the object suddenly moves, leave target-confirmed state.
             if (largeMovement) {
 
                 targetLatched = false;
+
                 targetConfidence = 0;
+
                 movingObjectDetected = true;
 
                 trackingState =
@@ -661,49 +1010,71 @@ bool TieredTargetDetector::update() {
                 break;
             }
 
-            if (currentCandidate) {
 
-                // Keep the target alive while the sensors continue
-                // seeing it.
-                if (targetConfidence < 100) {
-                    targetConfidence += 1;
-                }
+            // If LiDAR directly identifies the ToF POI as an obstacle,
+            // do not keep reporting it as a target.
+            //
+            // We intentionally do not immediately erase all historical
+            // confidence here. The confidence system can recover from
+            // a single noisy LiDAR observation.
+            if (anyObstacle) {
+
+                targetLatched = false;
+
+                trackingState =
+                    TargetTrackingState::NEAR_CONFIRMING;
+
+                break;
+            }
+
+
+            if (currentCandidate) {
 
                 lastCandidatePoint =
                     currentCandidatePoint;
 
-                lastCandidateUpdateMs = now;
+                lastCandidateUpdateMs =
+                    now;
 
-            } else if ((now - lastCandidateUpdateMs) >
-                       config.candidateTimeoutMs) {
+            }
+
+            else if ((now -
+                      lastCandidateUpdateMs) >
+                     config.candidateTimeoutMs) {
 
                 targetLatched = false;
+
                 targetConfidence = 0;
 
                 trackingState =
                     TargetTrackingState::NONE;
 
-                lastCandidatePoint = GridPoint{};
+                lastCandidatePoint =
+                    GridPoint{};
             }
 
             break;
 
 
-        // --------------------------------------------------------
+        // ===================================================================
         // MOVING OBJECT
-        // --------------------------------------------------------
+        // ===================================================================
 
         case TargetTrackingState::MOVING_OBJECT:
 
             targetLatched = false;
+
             movingObjectDetected = true;
+
             targetConfidence = 0;
 
-            // We require the moving object to disappear before
-            // looking for another target.
+
+            // Require the candidate to disappear before looking for
+            // another target.
             if (!currentCandidate) {
 
-                if ((now - lastCandidateUpdateMs) >
+                if ((now -
+                     lastCandidateUpdateMs) >
                     config.candidateTimeoutMs) {
 
                     movingObjectDetected = false;
@@ -711,73 +1082,169 @@ bool TieredTargetDetector::update() {
                     trackingState =
                         TargetTrackingState::NONE;
 
-                    lastCandidatePoint = GridPoint{};
+                    lastCandidatePoint =
+                        GridPoint{};
                 }
+            }
+
+            else {
+
+                lastCandidatePoint =
+                    currentCandidatePoint;
+
+                lastCandidateUpdateMs =
+                    now;
             }
 
             break;
     }
 
-    // ============================================================
-    // 13. UPDATE RESULT
-    // ============================================================
 
-    if (trackingState ==
-        TargetTrackingState::TARGET_CONFIRMED) {
+    // =======================================================================
+    // 16. FINAL RESULT
+    // =======================================================================
+
+    // Same-object LiDAR takes priority over target confirmation for this
+    // frame. This means a direct LiDAR/ToF match is reported as an obstacle.
+    if (anyObstacle) {
+
+        lastResult =
+            TierDetectionResult::Obstacle;
+    }
+
+    else if (trackingState ==
+             TargetTrackingState::TARGET_CONFIRMED) {
 
         lastResult =
             TierDetectionResult::Target;
+    }
 
-    } else if (trackingState ==
-               TargetTrackingState::MOVING_OBJECT) {
-
-        lastResult =
-            TierDetectionResult::Obstacle;
-
-    } else if (anyObstacle) {
+    else if (trackingState ==
+             TargetTrackingState::MOVING_OBJECT) {
 
         lastResult =
             TierDetectionResult::Obstacle;
+    }
 
-    } else if (currentCandidate) {
+    else if (currentCandidate) {
 
         lastResult =
             TierDetectionResult::Indeterminate;
+    }
 
-    } else {
+    else {
 
         lastResult =
             TierDetectionResult::None;
     }
 
-    // ============================================================
-    // 14. DEBUG
-    // ============================================================
 
-    debug.targetConfidence = targetConfidence;
-    debug.targetLatched = targetLatched;
-    debug.movingObjectDetected = movingObjectDetected;
+    // =======================================================================
+    // 17. DEBUG DATA
+    // =======================================================================
+
+    debug.targetConfidence =
+        targetConfidence;
+
+    debug.targetLatched =
+        targetLatched;
+
+    debug.movingObjectDetected =
+        movingObjectDetected;
+
 
     return true;
 }
 
-TierDetectionResult TieredTargetDetector::getDetectionResult() const {
+
+// ===========================================================================
+// PUBLIC GETTERS
+// ===========================================================================
+
+TierDetectionResult
+TieredTargetDetector::getDetectionResult() const {
+
     return lastResult;
 }
 
+
 bool TieredTargetDetector::isTargetConfirmed() const {
+
     return targetLatched;
 }
 
+
+bool TieredTargetDetector::isObstacleDetected() const {
+
+    return lastResult ==
+           TierDetectionResult::Obstacle;
+}
+
+
+bool TieredTargetDetector::hasValidData() const {
+
+    return
+        isDistanceValid(debug.nearA) &&
+        isDistanceValid(debug.nearB) &&
+        isDistanceValid(debug.farA) &&
+        isDistanceValid(debug.farB);
+}
+
+
+uint8_t TieredTargetDetector::getTargetConfidence() const {
+
+    return targetConfidence;
+}
+
+
+bool TieredTargetDetector::isTargetLatched() const {
+
+    return targetLatched;
+}
+
+
 bool TieredTargetDetector::isMovingObjectDetected() const {
+
     return movingObjectDetected;
 }
 
-TargetTrackingState TieredTargetDetector::getTrackingState() const {
+
+TargetTrackingState
+TieredTargetDetector::getTrackingState() const {
+
     return trackingState;
 }
 
-const char* TieredTargetDetector::trackingStateToString(
+
+// ===========================================================================
+// STRING HELPERS
+// ===========================================================================
+
+const char*
+TieredTargetDetector::resultToString(
+    TierDetectionResult result) const {
+
+    switch (result) {
+
+        case TierDetectionResult::None:
+            return "None";
+
+        case TierDetectionResult::Target:
+            return "Target";
+
+        case TierDetectionResult::Obstacle:
+            return "Obstacle";
+
+        case TierDetectionResult::Indeterminate:
+            return "Indeterminate";
+    }
+
+    return "Unknown";
+}
+
+
+const char*
+TieredTargetDetector::trackingStateToString(
     TargetTrackingState state) const {
 
     switch (state) {
@@ -804,136 +1271,326 @@ const char* TieredTargetDetector::trackingStateToString(
     return "UNKNOWN";
 }
 
-bool TieredTargetDetector::isObstacleDetected() const {
-    return lastResult == TierDetectionResult::Obstacle;
-}
 
-bool TieredTargetDetector::hasValidData() const {
-    return isDistanceValid(debug.nearA) && isDistanceValid(debug.nearB) &&
-           isDistanceValid(debug.farA) && isDistanceValid(debug.farB);
-}
-
-const char* TieredTargetDetector::resultToString(TierDetectionResult result) const {
-    switch (result) {
-        case TierDetectionResult::None:
-            return "None";
-        case TierDetectionResult::Target:
-            return "Target";
-        case TierDetectionResult::Obstacle:
-            return "Obstacle";
-        case TierDetectionResult::Indeterminate:
-            return "Indeterminate";
-    }
-    return "Unknown";
-}
+// ===========================================================================
+// DEBUG PRINT
+// ===========================================================================
 
 void TieredTargetDetector::debugPrint() const {
-    Serial.print("TierDetector nearA:"); Serial.print(debug.nearA == INVALID_DISTANCE ? 0xFFFF : debug.nearA);
-    Serial.print(" nearB:"); Serial.print(debug.nearB == INVALID_DISTANCE ? 0xFFFF : debug.nearB);
-    Serial.print(" farA:"); Serial.print(debug.farA == INVALID_DISTANCE ? 0xFFFF : debug.farA);
-    Serial.print(" farB:"); Serial.print(debug.farB == INVALID_DISTANCE ? 0xFFFF : debug.farB);
-    Serial.print(" nearAvg:"); Serial.print(debug.nearAverage == INVALID_DISTANCE ? 0xFFFF : debug.nearAverage);
-    Serial.print(" farAvg:"); Serial.print(debug.farAverage == INVALID_DISTANCE ? 0xFFFF : debug.farAverage);
-    Serial.print(" objDist:"); Serial.print(debug.objectDistance == INVALID_DISTANCE ? 0xFFFF : debug.objectDistance);
-    Serial.print(" pairNear:"); Serial.print(debug.nearPairMatch);
-    Serial.print(" pairFar:"); Serial.print(debug.farPairMatch);
-    Serial.print(" lidarObsNear:"); Serial.print(debug.nearLidarConfirmsObstacle);
-    Serial.print(" lidarObsFar:"); Serial.print(debug.farLidarConfirmsObstacle);
-    Serial.print(" steerActive:"); Serial.print(debug.steeringActive);
-    Serial.print(" steer:"); Serial.print(debug.steeringValue, 2);
-    Serial.print(" confidence:"); Serial.print(debug.targetConfidence);
-    Serial.print(" latched:"); Serial.print(debug.targetLatched);
-    Serial.print(" moving:"); Serial.print(debug.movingObjectDetected);
-    Serial.print(" state:"); Serial.print(trackingStateToString(trackingState));
-    Serial.print(" result:"); Serial.println(resultToString(lastResult));
+
+    Serial.println();
+    Serial.println(F("========== TARGET DETECTOR =========="));
+
+    // ---------------------------------------------------------------
+    // RAW TOF
+    // ---------------------------------------------------------------
+
+    Serial.print(F("TOF  NearA="));
+    Serial.print(debug.nearA);
+
+    Serial.print(F(" NearB="));
+    Serial.print(debug.nearB);
+
+    Serial.print(F(" FarA="));
+    Serial.print(debug.farA);
+
+    Serial.print(F(" FarB="));
+    Serial.println(debug.farB);
+
+
+    // ---------------------------------------------------------------
+    // TOF GEOMETRY
+    // ---------------------------------------------------------------
+
+    Serial.print(F("AVG  Near="));
+    Serial.print(debug.nearAverage);
+
+    Serial.print(F(" Far="));
+    Serial.print(debug.farAverage);
+
+    Serial.print(F(" Object="));
+    Serial.println(debug.objectDistance);
+
+
+    Serial.print(F("PAIR Near="));
+    Serial.print(debug.nearPairMatch);
+
+    Serial.print(F(" Far="));
+    Serial.println(debug.farPairMatch);
+
+
+    // ---------------------------------------------------------------
+    // TEMPORAL / MOVEMENT CHECKS
+    // ---------------------------------------------------------------
+
+    Serial.print(F("TEMP PositionOK="));
+    Serial.print(debug.positionConsistent);
+
+    Serial.print(F(" FarNearOK="));
+    Serial.print(debug.farNearConsistent);
+
+    Serial.print(F(" LargeMovement="));
+    Serial.println(debug.largeMovement);
+
+
+    // ---------------------------------------------------------------
+    // LIDAR
+    // ---------------------------------------------------------------
+
+    Serial.print(F("LIDAR SameNear="));
+    Serial.print(debug.nearLidarConfirmsObstacle);
+
+    Serial.print(F(" SameFar="));
+    Serial.print(debug.farLidarConfirmsObstacle);
+
+    Serial.print(F(" Separate="));
+    Serial.println(debug.separateLidarObstacle);
+
+
+    // ---------------------------------------------------------------
+    // STEERING
+    // ---------------------------------------------------------------
+
+    Serial.print(F("STEER Active="));
+    Serial.print(debug.steeringActive);
+
+    Serial.print(F(" Value="));
+    Serial.println(debug.steeringValue, 2);
+
+
+    // ---------------------------------------------------------------
+    // CONFIDENCE
+    // ---------------------------------------------------------------
+
+    Serial.print(F("CONFIDENCE="));
+    Serial.print(debug.targetConfidence);
+
+    Serial.print(F(" / 100"));
+
+    Serial.print(F(" Latched="));
+    Serial.print(debug.targetLatched);
+
+    Serial.print(F(" Moving="));
+    Serial.println(debug.movingObjectDetected);
+
+
+    // ---------------------------------------------------------------
+    // STATE / FINAL RESULT
+    // ---------------------------------------------------------------
+
+    Serial.print(F("STATE="));
+    Serial.println(
+        trackingStateToString(trackingState));
+
+    Serial.print(F("RESULT="));
+    Serial.println(
+        resultToString(lastResult));
+
+
+    Serial.println(F("======================================"));
 }
 
-void TieredTargetDetector::debugPrintGrid(Stream& serialport) const {
-    // teleplot.fr-style dump (see ld06.cpp printScanTeleplot) so the TOF hit
-    // points can be overlaid on the same plot as the lidar's own >lidar:xy
-    // series. Points marked (0,0)/invalid are omitted.
+
+// ===========================================================================
+// GRID DEBUG
+// ===========================================================================
+
+void TieredTargetDetector::debugPrintGrid(
+    Stream& serialport) const {
+
     serialport.print(F(">tof:"));
-    const GridPoint* pts[4] = { &debug.nearAPoint, &debug.nearBPoint, &debug.farAPoint, &debug.farBPoint };
+
+    const GridPoint* pts[4] = {
+        &debug.nearAPoint,
+        &debug.nearBPoint,
+        &debug.farAPoint,
+        &debug.farBPoint
+    };
+
+
     for (uint8_t i = 0; i < 4; i++) {
-        if (!pts[i]->valid) continue;
-        serialport.print(pts[i]->x, 1);
+
+        if (!pts[i]->valid)
+            continue;
+
+        serialport.print(
+            pts[i]->x,
+            1);
+
         serialport.print(":");
-        serialport.print(pts[i]->y, 1);
+
+        serialport.print(
+            pts[i]->y,
+            1);
+
         serialport.print(";");
     }
+
     serialport.println(F("|xy"));
 }
 
-const TieredTargetDetector::DetectionDebug& TieredTargetDetector::getDebug() const {
+
+// ===========================================================================
+// DEBUG GETTER
+// ===========================================================================
+
+const TieredTargetDetector::DetectionDebug&
+TieredTargetDetector::getDebug() const {
+
     return debug;
 }
 
-bool TieredTargetDetector::isDistanceValid(uint16_t mm) const {
-    return mm != INVALID_DISTANCE && mm != 0;
+
+// ===========================================================================
+// DISTANCE VALIDATION
+// ===========================================================================
+
+bool TieredTargetDetector::isDistanceValid(
+    uint16_t mm) const {
+
+    return
+        mm != INVALID_DISTANCE &&
+        mm != 0;
 }
+
+
+// ===========================================================================
+// TOF PAIR MATCH
+// ===========================================================================
 
 bool TieredTargetDetector::pairMatch(
     uint16_t aMm,
     uint16_t bMm,
     uint16_t expectedMm) const {
 
-    if (!isDistanceValid(aMm) || !isDistanceValid(bMm)) {
+    if (!isDistanceValid(aMm) ||
+        !isDistanceValid(bMm)) {
+
         return false;
     }
 
-    // Both sensors must be reasonably close to each other.
-    // This prevents a very different pair of readings from passing
-    // just because their average happens to be correct.
     uint16_t pairDifference =
-        (aMm > bMm) ? (aMm - bMm) : (bMm - aMm);
+        (aMm > bMm)
+        ? (aMm - bMm)
+        : (bMm - aMm);
 
-    if (pairDifference > config.toleratedWidthMm) {
+    if (pairDifference >
+        config.toleratedWidthMm) {
+
         return false;
     }
 
-    // The average must still be near the expected intersection.
-    int32_t avg = (int32_t(aMm) + int32_t(bMm)) / 2;
+    int32_t avg =
+        (int32_t(aMm) +
+         int32_t(bMm)) /
+        2;
 
-    return (avg >= int32_t(expectedMm) -
-                     int32_t(config.intersectionToleranceMm)) &&
-           (avg <= int32_t(expectedMm) +
-                     int32_t(config.intersectionToleranceMm));
+    return
+        (avg >=
+         int32_t(expectedMm) -
+         int32_t(config.intersectionToleranceMm))
+        &&
+        (avg <=
+         int32_t(expectedMm) +
+         int32_t(config.intersectionToleranceMm));
 }
 
-uint16_t TieredTargetDetector::averageDistance(uint16_t aMm, uint16_t bMm) const {
-    if (!isDistanceValid(aMm) || !isDistanceValid(bMm)) {
+
+// ===========================================================================
+// AVERAGE DISTANCE
+// ===========================================================================
+
+uint16_t TieredTargetDetector::averageDistance(
+    uint16_t aMm,
+    uint16_t bMm) const {
+
+    if (!isDistanceValid(aMm) ||
+        !isDistanceValid(bMm)) {
+
         return INVALID_DISTANCE;
     }
-    return uint16_t((uint32_t(aMm) + uint32_t(bMm)) / 2);
+
+
+    return uint16_t(
+        (uint32_t(aMm) +
+         uint32_t(bMm)) /
+        2);
 }
 
-bool TieredTargetDetector::withinDetectionEnvelope(uint16_t rangeMm) const {
-    if (!isDistanceValid(rangeMm)) return false;
-    if (rangeMm > config.maxDetectionRangeMm) return false;
+
+// ===========================================================================
+// DETECTION ENVELOPE
+// ===========================================================================
+
+bool TieredTargetDetector::withinDetectionEnvelope(
+    uint16_t rangeMm) const {
+
+    if (!isDistanceValid(rangeMm))
+        return false;
+
+    if (rangeMm >
+        config.maxDetectionRangeMm)
+        return false;
+
     return true;
 }
+
+
+// ===========================================================================
+// TOF POINT MIDPOINT
+// ===========================================================================
+
+GridPoint TieredTargetDetector::midpoint(
+    const GridPoint& a,
+    const GridPoint& b) const {
+
+    GridPoint m;
+
+
+    if (a.valid && b.valid) {
+
+        m.x =
+            (a.x + b.x) /
+            2.0f;
+
+        m.y =
+            (a.y + b.y) /
+            2.0f;
+
+        m.valid = true;
+    }
+
+    else if (a.valid) {
+
+        m = a;
+    }
+
+    else if (b.valid) {
+
+        m = b;
+    }
+
+
+    return m;
+}
+
+
+// ===========================================================================
+// LIDAR POINT -> ROBOT GRID
+// ===========================================================================
 
 GridPoint TieredTargetDetector::lidarPointToRobotGrid(
     const DataPoint& point) const {
 
     GridPoint p;
 
-    // LD06 angle correction.
-    //
-    // Robot frame:
-    //   0°   = FRONT
-    //   +90° = RIGHT
-    //   -90° = LEFT
-    //
-    // LiDAR mounting position relative to robot origin:
-    //   X = +38 mm
-    //   Y = -96 mm
 
-    constexpr float LIDAR_X_MM = 38.0f;
-    constexpr float LIDAR_Y_MM = -96.0f;
-    constexpr float LIDAR_YAW_OFFSET_DEG = 37.5f;
+    // Convert the LD06 angle into the robot coordinate frame.
 
-    float robotAngleDeg = point.angle + LIDAR_YAW_OFFSET_DEG;
+    float robotAngleDeg =
+        point.angle +
+        LIDAR_YAW_OFFSET_DEG;
+
 
     while (robotAngleDeg >= 360.0f) {
         robotAngleDeg -= 360.0f;
@@ -943,350 +1600,639 @@ GridPoint TieredTargetDetector::lidarPointToRobotGrid(
         robotAngleDeg += 360.0f;
     }
 
-    float angleRad = robotAngleDeg * PI / 180.0f;
 
-    // Point relative to the LiDAR
-    float lidarX = float(point.distance) * sinf(angleRad);
-    float lidarY = -float(point.distance) * cosf(angleRad);
+    float angleRad =
+        robotAngleDeg *
+        PI /
+        180.0f;
 
-    // Translate from LiDAR frame to robot-origin frame
-    p.x = LIDAR_X_MM + lidarX;
-    p.y = LIDAR_Y_MM + lidarY;
+
+    // Position of the LiDAR relative to robot origin.
+
+    float lidarX =
+        float(point.distance) *
+        sinf(angleRad);
+
+    float lidarY =
+        -float(point.distance) *
+        cosf(angleRad);
+
+
+    // Translate to robot-origin coordinates.
+
+    p.x =
+        LIDAR_X_MM +
+        lidarX;
+
+    p.y =
+        LIDAR_Y_MM +
+        lidarY;
 
     p.valid = true;
+
 
     return p;
 }
 
-GridPoint TieredTargetDetector::midpoint(const GridPoint& a, const GridPoint& b) const {
-    GridPoint m;
-    if (a.valid && b.valid) {
-        m.x = (a.x + b.x) / 2.0f;
-        m.y = (a.y + b.y) / 2.0f;
-        m.valid = true;
-    } else if (a.valid) {
-        m = a;
-    } else if (b.valid) {
-        m = b;
-    }
-    return m;
-}
 
-bool TieredTargetDetector::isObstacleAgainstLidar(const GridPoint& tofPoint) const {
-    if (!tofPoint.valid) return false;
+// ===========================================================================
+// SAME-OBJECT LIDAR CHECK
+// ===========================================================================
 
-    float tofDist = tofPoint.distanceFromOrigin();
-    float tofBearing = tofPoint.bearingFromOriginDeg();
+bool TieredTargetDetector::isObstacleAgainstLidar(
+    const GridPoint& tofPoint) const {
+
+    if (!tofPoint.valid)
+        return false;
+
+
+    float tofDist =
+        tofPoint.distanceFromOrigin();
+
+    float tofBearing =
+        tofPoint.bearingFromOriginDeg();
+
 
     float lidarDist;
-    if (!findNearestLidarAtBearing(tofBearing, config.lidarBearingToleranceDeg, lidarDist)) {
-        // No corroborating lidar return at this bearing (timeout, out of
-        // lidar range, or momentarily occluded). Can't confirm a tall
-        // obstacle from absence of evidence, so don't flag one.
+
+
+    if (!findNearestLidarAtBearing(
+            tofBearing,
+            config.lidarBearingToleranceDeg,
+            lidarDist)) {
+
+        // No LiDAR return is NOT evidence that the object is absent.
         return false;
     }
 
-    return fabsf(lidarDist - tofDist) <= float(config.lidarMatchToleranceMm);
+
+    return
+        fabsf(
+            lidarDist -
+            tofDist)
+        <=
+        float(
+            config.lidarMatchToleranceMm);
 }
 
-bool TieredTargetDetector::hasSeparateLidarObstacle(const GridPoint& tofPoint) const {
 
-    if (!tofPoint.valid) {
+// ===========================================================================
+// SEPARATE LIDAR OBSTACLE
+// ===========================================================================
+//
+// Requirements:
+//
+//   1. LiDAR point between 80 and 700 mm
+//   2. Point is at least 100 mm from ToF POI
+//   3. At least 3 LiDAR points form a cluster
+//   4. Cluster radius <= 80 mm
+//
+// No additional angular gate is applied here yet.
+//
+// ===========================================================================
+
+bool TieredTargetDetector::hasSeparateLidarObstacle(
+    const GridPoint& tofPoint) const {
+
+    if (!tofPoint.valid)
         return false;
-    }
 
-    const uint16_t n = lidar.getNbPointsInScan();
 
-    for (uint16_t i = 0; i < n; ++i) {
+    const uint16_t n =
+        lidar.getNbPointsInScan();
 
-        DataPoint* anchorPoint = lidar.getPoints(i);
 
-        if (anchorPoint == nullptr ||
-            anchorPoint->distance < config.lidarObstacleMinMm ||
-            anchorPoint->distance > config.lidarObstacleMaxMm) {
+    if (n < config.minimumSeparateLidarPoints)
+        return false;
+
+
+    // -----------------------------------------------------------------------
+    // Search for a possible cluster anchor.
+    // -----------------------------------------------------------------------
+
+    for (uint16_t i = 0;
+         i < n;
+         ++i) {
+
+        DataPoint* anchorPoint =
+            lidar.getPoints(i);
+
+
+        if (anchorPoint == nullptr)
+            continue;
+
+
+        if (anchorPoint->distance <
+            config.lidarObstacleMinMm) {
+
             continue;
         }
 
-        GridPoint anchor = lidarPointToRobotGrid(*anchorPoint);
 
-        if (!anchor.valid) {
+        if (anchorPoint->distance >
+            config.lidarObstacleMaxMm) {
+
             continue;
         }
 
-        if (config.useSeparateObstacleAngleGate) {
-            const float bearing = anchor.bearingFromOriginDeg();
-            const float lo = config.separateObstacleAngleMinDeg;
-            const float hi = config.separateObstacleAngleMaxDeg;
 
-            const bool inside = (lo <= hi)
-                ? (bearing >= lo && bearing <= hi)
-                : (bearing >= lo || bearing <= hi);
+        GridPoint anchor =
+            lidarPointToRobotGrid(
+                *anchorPoint);
 
-            if (!inside) {
-                continue;
-            }
-        }
 
-        // The anchor itself must be physically separated from the ToF POI.
-        const float anchorDx = anchor.x - tofPoint.x;
-        const float anchorDy = anchor.y - tofPoint.y;
-        const float anchorSeparation =
-            sqrtf(anchorDx * anchorDx + anchorDy * anchorDy);
+        if (!anchor.valid)
+            continue;
 
-        if (anchorSeparation < float(config.separateObstacleDistanceMm)) {
+
+        // -------------------------------------------------------------------
+        // Anchor must be physically separated from the ToF POI.
+        // -------------------------------------------------------------------
+
+        float anchorDx =
+            anchor.x -
+            tofPoint.x;
+
+        float anchorDy =
+            anchor.y -
+            tofPoint.y;
+
+
+        float anchorSeparation =
+            sqrtf(
+                anchorDx * anchorDx +
+                anchorDy * anchorDy);
+
+
+        if (anchorSeparation <
+            float(config.separateObstacleDistanceMm)) {
+
             continue;
         }
 
-        // Count nearby LiDAR returns around this anchor. The anchor counts
-        // as point 1, so we need at least two more returns to form the
-        // required 3-point obstacle cluster.
+
+        // -------------------------------------------------------------------
+        // Count nearby LiDAR points.
+        // -------------------------------------------------------------------
+
         uint8_t clusterCount = 1;
 
-        for (uint16_t j = 0; j < n; ++j) {
 
-            if (j == i) {
+        for (uint16_t j = 0;
+             j < n;
+             ++j) {
+
+            if (j == i)
+                continue;
+
+
+            DataPoint* candidatePoint =
+                lidar.getPoints(j);
+
+
+            if (candidatePoint == nullptr)
+                continue;
+
+
+            if (candidatePoint->distance <
+                config.lidarObstacleMinMm) {
+
                 continue;
             }
 
-            DataPoint* candidatePoint = lidar.getPoints(j);
 
-            if (candidatePoint == nullptr ||
-                candidatePoint->distance < config.lidarObstacleMinMm ||
-                candidatePoint->distance > config.lidarObstacleMaxMm) {
+            if (candidatePoint->distance >
+                config.lidarObstacleMaxMm) {
+
                 continue;
             }
 
-            GridPoint candidate = lidarPointToRobotGrid(*candidatePoint);
 
-            if (!candidate.valid) {
+            GridPoint candidate =
+                lidarPointToRobotGrid(
+                    *candidatePoint);
+
+
+            if (!candidate.valid)
+                continue;
+
+
+            // ---------------------------------------------------------------
+            // Candidate must also be separated from ToF POI.
+            // ---------------------------------------------------------------
+
+            float dxToTof =
+                candidate.x -
+                tofPoint.x;
+
+            float dyToTof =
+                candidate.y -
+                tofPoint.y;
+
+
+            float separationFromTof =
+                sqrtf(
+                    dxToTof * dxToTof +
+                    dyToTof * dyToTof);
+
+
+            if (separationFromTof <
+                float(config.separateObstacleDistanceMm)) {
+
                 continue;
             }
 
-            if (config.useSeparateObstacleAngleGate) {
-                const float bearing = candidate.bearingFromOriginDeg();
-                const float lo = config.separateObstacleAngleMinDeg;
-                const float hi = config.separateObstacleAngleMaxDeg;
 
-                const bool inside = (lo <= hi)
-                    ? (bearing >= lo && bearing <= hi)
-                    : (bearing >= lo || bearing <= hi);
+            // ---------------------------------------------------------------
+            // Candidate must be close to the anchor.
+            // ---------------------------------------------------------------
 
-                if (!inside) {
-                    continue;
-                }
-            }
+            float dx =
+                candidate.x -
+                anchor.x;
 
-            // Every point in the cluster must also be separated from the
-            // ToF POI. This prevents a large object containing the ToF hit
-            // from being mistaken for a separate obstacle.
-            const float dxToTof = candidate.x - tofPoint.x;
-            const float dyToTof = candidate.y - tofPoint.y;
-            const float separationFromTof =
-                sqrtf(dxToTof * dxToTof + dyToTof * dyToTof);
+            float dy =
+                candidate.y -
+                anchor.y;
 
-            if (separationFromTof < float(config.separateObstacleDistanceMm)) {
-                continue;
-            }
 
-            const float dx = candidate.x - anchor.x;
-            const float dy = candidate.y - anchor.y;
-            const float clusterDistance =
-                sqrtf(dx * dx + dy * dy);
+            float clusterDistance =
+                sqrtf(
+                    dx * dx +
+                    dy * dy);
 
-            if (clusterDistance <= float(config.lidarClusterRadiusMm)) {
+
+            if (clusterDistance <=
+                float(config.lidarClusterRadiusMm)) {
+
                 ++clusterCount;
 
-                if (clusterCount >= config.minimumSeparateLidarPoints) {
+
+                if (clusterCount >=
+                    config.minimumSeparateLidarPoints) {
+
                     return true;
                 }
             }
         }
     }
 
+
     return false;
 }
 
-bool TieredTargetDetector::findNearestLidarAtBearing(float bearingDeg, float toleranceDeg, float& outDistanceMm) const {
-    uint16_t n = lidar.getNbPointsInScan();
-    float bestDelta = 1.0e6f;
+
+// ===========================================================================
+// FIND LIDAR POINT AT BEARING
+// ===========================================================================
+
+bool TieredTargetDetector::findNearestLidarAtBearing(
+    float bearingDeg,
+    float toleranceDeg,
+    float& outDistanceMm) const {
+
+    uint16_t n =
+        lidar.getNbPointsInScan();
+
+
+    float bestDelta =
+        1.0e6f;
+
     bool found = false;
 
-    for (uint16_t i = 0; i < n; i++) {
-        DataPoint* pt = lidar.getPoints(i);
 
-        GridPoint lidarPoint = lidarPointToRobotGrid(*pt);
+    for (uint16_t i = 0;
+         i < n;
+         i++) {
 
-        if (!lidarPoint.valid) {
+        DataPoint* pt =
+            lidar.getPoints(i);
+
+
+        if (pt == nullptr)
             continue;
-        }
 
-        float dist = lidarPoint.distanceFromOrigin();
-        float bear = lidarPoint.bearingFromOriginDeg();
+
+        if (pt->distance == 0)
+            continue;
+
+
+        GridPoint lidarPoint =
+            lidarPointToRobotGrid(*pt);
+
+
+        if (!lidarPoint.valid)
+            continue;
+
+
+        float dist =
+            lidarPoint.distanceFromOrigin();
+
+        float bear =
+            lidarPoint.bearingFromOriginDeg();
+
+
+        // Existing general LiDAR angle gate.
 
         if (config.useAngleGate) {
-            float lo = config.detectionAngleMinDeg;
-            float hi = config.detectionAngleMaxDeg;
-            bool inside = (lo <= hi)
+
+            float lo =
+                config.detectionAngleMinDeg;
+
+            float hi =
+                config.detectionAngleMaxDeg;
+
+
+            bool inside =
+                (lo <= hi)
                 ? (bear >= lo && bear <= hi)
                 : (bear >= lo || bear <= hi);
 
-            if (!inside) continue;
+
+            if (!inside)
+                continue;
         }
 
-        float delta = fabsf(angleDiffDeg(bear, bearingDeg));
 
-        if (delta <= toleranceDeg && delta < bestDelta) {
-            bestDelta = delta;
-            outDistanceMm = dist;
+        float delta =
+            fabsf(
+                angleDiffDeg(
+                    bear,
+                    bearingDeg));
+
+
+        if (delta <= toleranceDeg &&
+            delta < bestDelta) {
+
+            bestDelta =
+                delta;
+
+            outDistanceMm =
+                dist;
+
             found = true;
         }
     }
+
+
     return found;
 }
+
+
+// ===========================================================================
+// STEERING
+// ===========================================================================
 
 float TieredTargetDetector::computeSteering(
     const GridPoint& hit,
     const SensorMount& mountA,
     const SensorMount& mountB) const {
 
-    if (!hit.valid) {
+    if (!hit.valid)
         return 0.0f;
-    }
 
-    // Left/right sensor spacing is along X.
+
     float halfSpacing =
-        fabsf(mountA.xMm - mountB.xMm) / 2.0f;
+        fabsf(
+            mountA.xMm -
+            mountB.xMm) /
+        2.0f;
 
-    if (halfSpacing < 1.0f) {
+
+    if (halfSpacing < 1.0f)
         return 0.0f;
-    }
+
 
     // +X = right
     // -X = left
-    float norm = hit.x / halfSpacing;
 
-    if (norm > 1.0f) {
+    float norm =
+        hit.x /
+        halfSpacing;
+
+
+    if (norm > 1.0f)
         norm = 1.0f;
-    }
 
-    if (norm < -1.0f) {
+    if (norm < -1.0f)
         norm = -1.0f;
-    }
+
 
     return norm;
 }
 
+
+// ===========================================================================
+// LIDAR FRONT TEST
+// ===========================================================================
+
 void TieredTargetDetector::debugPrintLidarFrontTest() const {
-    uint16_t n = lidar.getNbPointsInScan();
+
+    uint16_t n =
+        lidar.getNbPointsInScan();
+
 
     Serial.println();
-    Serial.println("===== LIDAR RAW FRONT TEST =====");
-    Serial.print("Points in scan: ");
+    Serial.println(
+        "===== LIDAR RAW FRONT TEST =====");
+
+
+    Serial.print(
+        "Points in scan: ");
+
     Serial.println(n);
 
+
     if (n == 0) {
-        Serial.println("No LiDAR points available.");
-        Serial.println("================================");
+
+        Serial.println(
+            "No LiDAR points available.");
+
+        Serial.println(
+            "================================");
+
         return;
     }
 
-    // Find the 10 closest LiDAR points in the current scan.
-    // We use these to identify the object placed in front of the robot
-    // without assuming anything about the LD06 angle convention yet.
 
     const uint8_t NUM_CLOSEST = 10;
 
-    uint16_t closestDistance[NUM_CLOSEST];
-    uint16_t closestIndex[NUM_CLOSEST];
 
-    for (uint8_t i = 0; i < NUM_CLOSEST; i++) {
-        closestDistance[i] = 0xFFFF;
-        closestIndex[i] = 0xFFFF;
+    uint16_t closestDistance[
+        NUM_CLOSEST];
+
+    uint16_t closestIndex[
+        NUM_CLOSEST];
+
+
+    for (uint8_t i = 0;
+         i < NUM_CLOSEST;
+         i++) {
+
+        closestDistance[i] =
+            0xFFFF;
+
+        closestIndex[i] =
+            0xFFFF;
     }
 
-    for (uint16_t i = 0; i < n; i++) {
-        DataPoint* pt = lidar.getPoints(i);
 
-        if (pt == nullptr) {
+    for (uint16_t i = 0;
+         i < n;
+         i++) {
+
+        DataPoint* pt =
+            lidar.getPoints(i);
+
+
+        if (pt == nullptr)
             continue;
-        }
 
-        if (pt->distance == 0) {
+
+        if (pt->distance == 0)
             continue;
-        }
 
-        // Insert this point into the sorted list if it is one
-        // of the 10 closest points.
-        for (uint8_t j = 0; j < NUM_CLOSEST; j++) {
 
-            if (pt->distance < closestDistance[j]) {
+        for (uint8_t j = 0;
+             j < NUM_CLOSEST;
+             j++) {
 
-                // Shift existing entries down.
-                for (uint8_t k = NUM_CLOSEST - 1; k > j; k--) {
-                    closestDistance[k] = closestDistance[k - 1];
-                    closestIndex[k] = closestIndex[k - 1];
+            if (pt->distance <
+                closestDistance[j]) {
+
+                for (uint8_t k =
+                         NUM_CLOSEST - 1;
+                     k > j;
+                     k--) {
+
+                    closestDistance[k] =
+                        closestDistance[k - 1];
+
+                    closestIndex[k] =
+                        closestIndex[k - 1];
                 }
 
-                closestDistance[j] = pt->distance;
-                closestIndex[j] = i;
+
+                closestDistance[j] =
+                    pt->distance;
+
+                closestIndex[j] =
+                    i;
 
                 break;
             }
         }
     }
 
-    Serial.println("Closest LiDAR points:");
 
-    for (uint8_t i = 0; i < NUM_CLOSEST; i++) {
+    Serial.println(
+        "Closest LiDAR points:");
 
-        if (closestIndex[i] == 0xFFFF) {
+
+    for (uint8_t i = 0;
+         i < NUM_CLOSEST;
+         i++) {
+
+        if (closestIndex[i] ==
+            0xFFFF) {
+
             continue;
         }
 
-        DataPoint* pt = lidar.getPoints(closestIndex[i]);
 
-        if (pt == nullptr) {
+        DataPoint* pt =
+            lidar.getPoints(
+                closestIndex[i]);
+
+
+        if (pt == nullptr)
             continue;
-        }
+
 
         Serial.print("#");
         Serial.print(i + 1);
 
-        Serial.print("  angle=");
-        Serial.print(pt->angle, 2);
-        Serial.print(" deg");
 
-        Serial.print("  distance=");
-        Serial.print(pt->distance);
-        Serial.print(" mm");
+        Serial.print(
+            "  angle=");
 
-        #ifdef LD06_COMPUTE_XY
-        Serial.print("  LD06 x=");
-        Serial.print(pt->x);
+        Serial.print(
+            pt->angle,
+            2);
 
-        Serial.print(" mm");
+        Serial.print(
+            " deg");
 
-        Serial.print("  LD06 y=");
-        Serial.print(pt->y);
 
-        Serial.print(" mm");
-        #endif
+        Serial.print(
+            "  distance=");
 
-        GridPoint robotPoint = lidarPointToRobotGrid(*pt);
+        Serial.print(
+            pt->distance);
 
-        Serial.print("  Robot X=");
-        Serial.print(robotPoint.x, 1);
+        Serial.print(
+            " mm");
 
-        Serial.print(" mm");
 
-        Serial.print("  Robot Y=");
-        Serial.print(robotPoint.y, 1);
+#ifdef LD06_COMPUTE_XY
 
-        Serial.print(" mm");
+        Serial.print(
+            "  LD06 x=");
 
-        Serial.print("  intensity=");
-        Serial.println(pt->intensity);
+        Serial.print(
+            pt->x);
+
+        Serial.print(
+            " mm");
+
+
+        Serial.print(
+            "  LD06 y=");
+
+        Serial.print(
+            pt->y);
+
+        Serial.print(
+            " mm");
+
+#endif
+
+
+        GridPoint robotPoint =
+            lidarPointToRobotGrid(
+                *pt);
+
+
+        Serial.print(
+            "  Robot X=");
+
+        Serial.print(
+            robotPoint.x,
+            1);
+
+        Serial.print(
+            " mm");
+
+
+        Serial.print(
+            "  Robot Y=");
+
+        Serial.print(
+            robotPoint.y,
+            1);
+
+        Serial.print(
+            " mm");
+
+
+        Serial.print(
+            "  intensity=");
+
+        Serial.println(
+            pt->intensity);
     }
 
-    Serial.println("================================");
+
+    Serial.println(
+        "================================");
 }
