@@ -37,6 +37,9 @@ private:
   static constexpr float LIDAR_OFFSET_Y_M = -0.04f;
   static constexpr float LIDAR_YAW_OFFSET_RAD = 0.0f;
   static constexpr uint16_t LIDAR_MATCH_MIN_POINTS = 24;
+  static constexpr uint16_t LIDAR_MATCH_STRIDE = 12;
+  static constexpr int LIDAR_COARSE_RADIUS = 1;
+  static constexpr int LIDAR_FINE_RADIUS = 1;
   static constexpr float LIDAR_MATCH_MIN_SCORE = 300.0f;
   static constexpr float LIDAR_MATCH_MIN_IMPROVEMENT = 80.0f;
   static constexpr float LIDAR_MATCH_AMBIGUITY_MARGIN = 40.0f;

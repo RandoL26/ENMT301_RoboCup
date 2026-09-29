@@ -1383,10 +1383,19 @@ void loop() {
     static unsigned long last_pose_ms = 0;
     static unsigned long last_grid_ms = 0;
     static unsigned long last_inflated_grid_ms = 0;
-
+    static unsigned long last_replan_ms = 0;
     unsigned long now = millis();
 
-#if !OPTICAL_FLOW_SERIAL_TEST
+    if (now - last_replan_ms >= 500) {
+        const float robot_radius_m =
+            sqrtf(0.25f * MappingNav::ROBOT_LENGTH_M * MappingNav::ROBOT_LENGTH_M +
+                0.25f * MappingNav::ROBOT_WIDTH_M * MappingNav::ROBOT_WIDTH_M) +
+            MappingNav::ROBOT_SAFETY_MARGIN_M;
+
+        mappingNav.replanPath(robot_radius_m);
+        last_replan_ms = now;
+    }
+
     if (now - last_status_ms >= 200) {
         send_robot_status_telemetry();
         last_status_ms = now;
@@ -1412,6 +1421,6 @@ void loop() {
         telemetry_send_inflated_grid(mappingNav);
         last_inflated_grid_ms = now;
     }
-#endif
+
 }
 
