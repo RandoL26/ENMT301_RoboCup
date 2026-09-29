@@ -11,7 +11,7 @@
 #define TOF_GEOMETRY_H
 
 #include <stdint.h>
-#include "Localisation.h"
+#include "MappingNav.h"
 #include "POIDetector.h"
 
 //====================================
@@ -24,13 +24,13 @@ class ToFGeometry {
 public:
     // Calculate ToF sensor origin position in world frame
     // Inputs:
-    //   robot_pose: fused robot pose (x_mm, y_mm, theta_rad)
+    //   robot_pose: authoritative MappingNav pose (metres and radians)
     //   tof_extrinsics: sensor mount offset and yaw
     // Outputs:
     //   sensor_x_m, sensor_y_m: world position of sensor
     //   sensor_yaw_rad: world heading of sensor beam
     static void getSensorWorldFrame(
-        const RobotPose &robot_pose,
+        const MappingNav::Pose2D &robot_pose,
         const ToFExtrinsics &tof_extrinsics,
         float &sensor_x_m,
         float &sensor_y_m,

@@ -34,13 +34,15 @@ void telemetry_send_status(
 );
 
 void telemetry_send_localisation_debug(
-    float encoder_dx_m,
+    float encoder_left_delta_m,
+    float encoder_right_delta_m,
     float encoder_dtheta_rad,
-    float flow_dx_m,
-    float flow_dy_m,
     float imu_dtheta_rad,
-    float imu_heading_deg,
-    const MappingNav::Pose2D &pose
+    float lidar_match_score,
+    float lidar_correction_accepted,
+    const MappingNav::Pose2D &pose,
+    float lidar_dx_m, float lidar_dy_m, float lidar_dtheta_rad,
+    int32_t encoder_left_count, int32_t encoder_right_count
 );
 
 // Send inflated obstacle grid.

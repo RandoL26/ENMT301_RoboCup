@@ -33,6 +33,8 @@ void MappingNav::reset() {
   m_pose.x_m = ARENA_WIDTH_M * 0.5f;
   m_pose.y_m = ARENA_HEIGHT_M * 0.5f;
   m_pose.theta_rad = 0.0f;
+  m_position_uncertainty_m = 0.05f;
+  m_heading_uncertainty_rad = 0.05f;
 
   plannerResetAll();
 }
@@ -47,34 +49,63 @@ MappingNav::Pose2D MappingNav::getPose() const {
   return m_pose;
 }
 
+float MappingNav::getPositionUncertaintyM() const {
+  return m_position_uncertainty_m;
+}
+
+float MappingNav::getHeadingUncertaintyRad() const {
+  return m_heading_uncertainty_rad;
+}
+
 void MappingNav::updatePose(const PoseUpdateInput &input,
-                            float translation_encoder_weight,
                             float heading_imu_weight) {
-  if (translation_encoder_weight < 0.0f) translation_encoder_weight = 0.0f;
-  if (translation_encoder_weight > 1.0f) translation_encoder_weight = 1.0f;
   if (heading_imu_weight < 0.0f) heading_imu_weight = 0.0f;
   if (heading_imu_weight > 1.0f) heading_imu_weight = 1.0f;
 
-  const float w_enc = translation_encoder_weight;
-  const float w_flow = 1.0f - w_enc;
+  float dtheta = 0.0f;
+  if (input.imu_heading_valid && input.encoder_heading_valid) {
+    dtheta = (1.0f - heading_imu_weight) * input.encoder_dtheta_rad +
+             heading_imu_weight * input.imu_gyro_dtheta_rad;
+  } else if (input.imu_heading_valid) {
+    dtheta = input.imu_gyro_dtheta_rad;
+  } else if (input.encoder_heading_valid) {
+    dtheta = input.encoder_dtheta_rad;
+  }
 
-  const float dx_body = w_enc * input.encoder_dx_m + w_flow * input.flow_dx_m;
-  const float dy_body = w_enc * input.encoder_dy_m + w_flow * input.flow_dy_m;
-
-  const float dtheta = (1.0f - heading_imu_weight) * input.encoder_dtheta_rad +
-                       heading_imu_weight * input.imu_gyro_dtheta_rad;
+  const float ds = input.encoder_translation_valid
+      ? 0.5f * (input.encoder_left_delta_m + input.encoder_right_delta_m)
+      : 0.0f;
 
   const float theta_mid = m_pose.theta_rad + 0.5f * dtheta;
   const float c = cosf(theta_mid);
   const float s = sinf(theta_mid);
 
-  m_pose.x_m += dx_body * c - dy_body * s;
-  m_pose.y_m += dx_body * s + dy_body * c;
+  m_pose.x_m += ds * c;
+  m_pose.y_m += ds * s;
   m_pose.theta_rad = wrapAngle(m_pose.theta_rad + dtheta);
+  m_position_uncertainty_m += fabsf(ds) * 0.02f + 0.00002f;
+  m_heading_uncertainty_rad += fabsf(dtheta) * 0.02f + 0.00001f;
+  if (m_position_uncertainty_m > 2.0f) m_position_uncertainty_m = 2.0f;
+  if (m_heading_uncertainty_rad > 3.14159f) m_heading_uncertainty_rad = 3.14159f;
 
   // Keep pose inside arena bounds.
   m_pose.x_m = minf(maxf(m_pose.x_m, 0.0f), ARENA_WIDTH_M);
   m_pose.y_m = minf(maxf(m_pose.y_m, 0.0f), ARENA_HEIGHT_M);
+}
+
+void MappingNav::applyPoseCorrection(float dx_m, float dy_m, float dtheta_rad) {
+  setPose(m_pose.x_m + dx_m, m_pose.y_m + dy_m,
+          m_pose.theta_rad + dtheta_rad);
+  m_position_uncertainty_m *= 0.8f;
+  m_heading_uncertainty_rad *= 0.8f;
+  if (m_position_uncertainty_m < 0.01f) m_position_uncertainty_m = 0.01f;
+  if (m_heading_uncertainty_rad < 0.01f) m_heading_uncertainty_rad = 0.01f;
+}
+
+bool MappingNav::isOccupiedWorld(float x_m, float y_m) const {
+  uint16_t cx = 0, cy = 0;
+  if (!worldToCell(x_m, y_m, cx, cy)) return false;
+  return getOccupancy(indexOf(cx, cy)) == OCC_OCCUPIED;
 }
 
 void MappingNav::updateGridFromSensors(const SensorRay *rays, uint16_t ray_count) {

@@ -12,7 +12,6 @@
 
 // Forward declarations
 class MappingNav;
-class Localisation;
 class TOFSensorArray;
 
 //====================================
@@ -162,11 +161,10 @@ public:
     // Main update: process latest ToF reading
     // Call this periodically (e.g., 10-20 Hz) when new ToF data is available
     // Requires:
-    // - localisation: fused robot pose (x_m, y_m, theta_rad)
+    // - mappingNav: authoritative fused robot pose and occupancy map
     // - mappingNav: occupancy grid and map knowledge
     // - tofDistance_m: latest ToF measurement (0 = invalid/no return)
-    void update(const Localisation &localisation,
-                const MappingNav &mappingNav,
+    void update(const MappingNav &mappingNav,
                 float tofDistance_m);
     
     // Query current POI candidate state
@@ -209,7 +207,7 @@ private:
     // Helper methods
     
     // Calculate ToF sensor position in world frame given robot pose
-    void calculateToFWorldPosition(const Localisation &loc,
+    void calculateToFWorldPosition(const MappingNav &nav,
                                    float &out_x_m, float &out_y_m,
                                    float &out_yaw_rad) const;
     
@@ -228,7 +226,7 @@ private:
                                  float &out_x_m, float &out_y_m) const;
     
     // Process anomaly: update candidate state based on latest reading
-    void processAnomaly(const Localisation &loc, float tof_range_m,
+    void processAnomaly(const MappingNav &nav, float tof_range_m,
                         float expected_range_m, ExpectedRangeStatus status);
     
     // Try to confirm candidate if criteria met

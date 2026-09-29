@@ -21,13 +21,14 @@
 #define NO_WEIGHT               0   
 #define WEIGHT_FOUND            1
 #define ELECTROMAGNET_PIN       26
-#define PICKUP_ANGLE            180
-#define DROPOFF_ANGLE           90
+
+#define PICKUP_ANGLE            169
+#define DROPOFF_ANGLE           120
 
 void weight_scan(/* whatever parameters */);
 
 
-void collect_weight();
+void collect_weight(int collect_time);
 
 
 

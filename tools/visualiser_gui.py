@@ -75,6 +75,11 @@ DEFAULT_GRID_W = 48
 DEFAULT_GRID_H = 98
 DEFAULT_CELL_MM = 50
 
+# Match the mounting extrinsics in RoboSLAM::processScan().
+LIDAR_OFFSET_X_M = 0.10
+LIDAR_OFFSET_Y_M = -0.04
+LIDAR_YAW_OFFSET_RAD = 0.0
+
 
 # ============================================================
 # CRC
@@ -130,15 +135,29 @@ class TelemetryState:
     scan_packet_count: int = 0
     scan_point_count: int = 0
 
+    start_side: Optional[int] = None
+    sensor_flags: int = 0
+    motor_left: int = 0
+    motor_right: int = 0
+    left_rpm: float = 0.0
+    right_rpm: float = 0.0
+    planner_goal_set: bool = False
+    goal_cell: int = 0
+    status_path_length: int = 0
+    lidar_diag: Optional[dict] = None
+
         # Localisation diagnostics
-    encoder_dx_m: float = 0.0
+    encoder_left_delta_m: float = 0.0
+    encoder_right_delta_m: float = 0.0
     encoder_dtheta_rad: float = 0.0
-
-    flow_dx_m: float = 0.0
-    flow_dy_m: float = 0.0
-
     imu_dtheta_rad: float = 0.0
-    imu_heading_deg: float = 0.0
+    lidar_match_score: float = 0.0
+    lidar_correction_accepted: bool = False
+    lidar_dx_m: float = 0.0
+    lidar_dy_m: float = 0.0
+    lidar_dtheta_rad: float = 0.0
+    encoder_left_count: int = 0
+    encoder_right_count: int = 0
 
 # ============================================================
 # TELEMETRY PACKET
@@ -315,9 +334,11 @@ class TelemetryReconstructor:
         if packet.packet_type == PACKET_SCAN:
             return self.scan(packet.payload)
 
-        # Diagnostic packets are currently ignored.
         if packet.packet_type == PACKET_DIAG:
-            return False
+            return self.diagnostics(packet.payload)
+
+        if packet.packet_type == PACKET_STATUS:
+            return self.status(packet.payload)
 
         # Inflated obstacle grid.
         if packet.packet_type == PACKET_INFLATED_GRID:
@@ -687,7 +708,7 @@ class TelemetryReconstructor:
                 2:
                 required
             ],
-            dtype=np.float32,
+            dtype="<f4",
         )
 
         if raw.size != count * 2:
@@ -701,6 +722,46 @@ class TelemetryReconstructor:
 
         self.state.scan_point_count = count
 
+        return True
+
+    def diagnostics(self, payload):
+        # C++ emits 3 little-endian u32 values followed by 25 u16 values.
+        # This is the verified 62-byte 0x06 layout in telemetry_send_diag_scan.
+        if len(payload) != 62:
+            return False
+        values = struct.unpack("<III25H", payload)
+        u16 = values[3:]
+        self.state.scan_packet_count = int(values[2])
+        self.state.scan_point_count = int(u16[0])
+        self.state.lidar_diag = {
+            "ready": values[0], "calls": values[1], "sent": values[2],
+            "points": u16[0], "zero": u16[1], "invalid": u16[2],
+            "min_mm": u16[3], "max_mm": u16[4], "distance_jumps": u16[5],
+            "matched": u16[6], "max_delta_mm": u16[7],
+            "delta_gt_100": u16[8], "delta_gt_500": u16[9],
+            "delta_gt_1000": u16[10], "max_delta_angle_deg": u16[11] / 100.0,
+            "mean_angle_diff_deg": u16[12] / 100.0,
+            "std_angle_diff_deg": u16[13] / 100.0,
+            "first_angle_deg": u16[15] / 100.0,
+            "last_angle_deg": u16[16] / 100.0,
+            "min_angle_deg": u16[17] / 100.0,
+            "max_angle_deg": u16[18] / 100.0,
+            "direction_anomalies": u16[19], "large_angle_jumps": u16[20],
+            "largest_step_deg": max(u16[21], u16[22]) / 100.0,
+            "angular_travel_deg": u16[23] / 100.0,
+            "one_revolution": bool(u16[24]),
+        }
+        return True
+
+    def status(self, payload):
+        if len(payload) != 19:
+            return False
+        (self.state.start_side, self.state.sensor_flags,
+         self.state.motor_left, self.state.motor_right,
+         self.state.left_rpm, self.state.right_rpm,
+         goal_set, self.state.goal_cell,
+         self.state.status_path_length) = struct.unpack("<BBhhffBHH", payload)
+        self.state.planner_goal_set = bool(goal_set)
         return True
 
 
@@ -719,22 +780,23 @@ class TelemetryReconstructor:
         )
 
         (
-            self.state.encoder_dx_m,
+            self.state.encoder_left_delta_m,
+            self.state.encoder_right_delta_m,
             self.state.encoder_dtheta_rad,
-            self.state.flow_dx_m,
-            self.state.flow_dy_m,
             self.state.imu_dtheta_rad,
-            self.state.imu_heading_deg,
-            pose_x,
-            pose_y,
-            pose_theta,
+            self.state.lidar_match_score,
+            self.state.lidar_correction_accepted,
+            _pose_x,
+            _pose_y,
+            _pose_theta,
         ) = values
-
-        # Keep the normal pose synchronized with
-        # MappingNav's reported pose.
-        self.state.pose_x_m = pose_x
-        self.state.pose_y_m = pose_y
-        self.state.pose_theta_rad = pose_theta
+        self.state.lidar_correction_accepted = bool(
+            self.state.lidar_correction_accepted >= 0.5
+        )
+        if len(payload) >= 56:
+            (self.state.lidar_dx_m, self.state.lidar_dy_m,
+             self.state.lidar_dtheta_rad, self.state.encoder_left_count,
+             self.state.encoder_right_count) = struct.unpack("<3fii", payload[36:56])
 
         return True
 
@@ -790,7 +852,6 @@ class SerialWorker(threading.Thread):
             if self.reset_event.is_set():
                 parser = FrameParser()
                 reconstructor = TelemetryReconstructor()
-                self.reset_event.clear()
 
             try:
 
@@ -808,6 +869,18 @@ class SerialWorker(threading.Thread):
                     print(
                         "[serial] connected"
                     )
+
+                    if self.reset_event.is_set():
+                        ser.write(b"MAP RESET\n")
+                        ser.reset_input_buffer()
+                        parser = FrameParser()
+                        reconstructor = TelemetryReconstructor()
+                        self.reset_event.clear()
+                        while True:
+                            try:
+                                self.output_queue.get_nowait()
+                            except Empty:
+                                break
 
                     while not self.command_queue.empty():
 
@@ -847,6 +920,19 @@ class SerialWorker(threading.Thread):
                         data = ser.read(
                             4096
                         )
+
+                        if self.reset_event.is_set():
+                            ser.write(b"MAP RESET\n")
+                            ser.reset_input_buffer()
+                            parser = FrameParser()
+                            reconstructor = TelemetryReconstructor()
+                            self.reset_event.clear()
+                            while True:
+                                try:
+                                    self.output_queue.get_nowait()
+                                except Empty:
+                                    break
+                            continue
 
                         if not data:
                             continue
@@ -931,29 +1017,46 @@ class SerialWorker(threading.Thread):
                 state.scan_point_count
             ),
 
-                        encoder_dx_m=(
-                state.encoder_dx_m
+            start_side=state.start_side,
+            sensor_flags=state.sensor_flags,
+            motor_left=state.motor_left,
+            motor_right=state.motor_right,
+            left_rpm=state.left_rpm,
+            right_rpm=state.right_rpm,
+            planner_goal_set=state.planner_goal_set,
+            goal_cell=state.goal_cell,
+            status_path_length=state.status_path_length,
+            lidar_diag=(None if state.lidar_diag is None else dict(state.lidar_diag)),
+
+                        encoder_left_delta_m=(
+                state.encoder_left_delta_m
+            ),
+
+            encoder_right_delta_m=(
+                state.encoder_right_delta_m
             ),
 
             encoder_dtheta_rad=(
                 state.encoder_dtheta_rad
             ),
 
-            flow_dx_m=(
-                state.flow_dx_m
-            ),
-
-            flow_dy_m=(
-                state.flow_dy_m
-            ),
-
             imu_dtheta_rad=(
                 state.imu_dtheta_rad
             ),
 
-            imu_heading_deg=(
-                state.imu_heading_deg
+            lidar_match_score=(
+                state.lidar_match_score
             ),
+
+            lidar_correction_accepted=(
+                state.lidar_correction_accepted
+            ),
+
+            lidar_dx_m=state.lidar_dx_m,
+            lidar_dy_m=state.lidar_dy_m,
+            lidar_dtheta_rad=state.lidar_dtheta_rad,
+            encoder_left_count=state.encoder_left_count,
+            encoder_right_count=state.encoder_right_count,
 
         )
 
@@ -1220,14 +1323,13 @@ class RoboCupVisualizer(QMainWindow):
 
         self.localisation_label = QLabel(
             "ENCODER:\n"
-            "  dX:      --\n"
+            "  counts:  -- / --\n"
+            "  left:    --\n"
+            "  right:   --\n"
             "  dTheta:  --\n"
-            "FLOW:\n"
-            "  dX:      --\n"
-            "  dY:      --\n"
             "IMU:\n"
             "  dTheta:  --\n"
-            "  Heading: --"
+            "LiDAR match: --"
         )
 
         self.localisation_label.setStyleSheet(
@@ -1357,6 +1459,10 @@ class RoboCupVisualizer(QMainWindow):
         telemetry_layout.addWidget(
             self.telemetry_label
         )
+
+        self.lidar_diag_label = QLabel("LiDAR: no diagnostics")
+        self.lidar_diag_label.setStyleSheet("font-family: monospace;")
+        telemetry_layout.addWidget(self.lidar_diag_label)
 
         side_layout.addWidget(
             telemetry_group
@@ -1732,9 +1838,13 @@ class RoboCupVisualizer(QMainWindow):
 
     def reset_data(self):
 
-        self.serial_worker.send_command("MAP RESET")
-        
         self.serial_worker.reset_data()
+
+        while True:
+            try:
+                self.queue.get_nowait()
+            except Empty:
+                break
 
         # Clear telemetry state
         self.state = TelemetryState()
@@ -1781,14 +1891,13 @@ class RoboCupVisualizer(QMainWindow):
 
         self.localisation_label.setText(
             "ENCODER:\n"
-            "  dX:      --\n"
+            "  counts:  -- / --\n"
+            "  left:    --\n"
+            "  right:   --\n"
             "  dTheta:  --\n"
-            "FLOW:\n"
-            "  dX:      --\n"
-            "  dY:      --\n"
             "IMU:\n"
             "  dTheta:  --\n"
-            "  Heading: --"
+            "LiDAR match: --"
         )
 
         self.planner_label.setText(
@@ -1810,6 +1919,7 @@ class RoboCupVisualizer(QMainWindow):
             "DROPPED:   --\n"
             "UPTIME:    --"
         )
+        self.lidar_diag_label.setText("LiDAR: no diagnostics")
 
         # Reset camera as well
         self.reset_view()
@@ -2091,23 +2201,29 @@ class RoboCupVisualizer(QMainWindow):
 
             xs = (
                 state.pose_x_m
+                + LIDAR_OFFSET_X_M * math.cos(state.pose_theta_rad)
+                - LIDAR_OFFSET_Y_M * math.sin(state.pose_theta_rad)
                 +
                 distances
                 * np.cos(
                     angles
                     +
                     state.pose_theta_rad
+                    + LIDAR_YAW_OFFSET_RAD
                 )
             )
 
             ys = (
                 state.pose_y_m
+                + LIDAR_OFFSET_X_M * math.sin(state.pose_theta_rad)
+                + LIDAR_OFFSET_Y_M * math.cos(state.pose_theta_rad)
                 +
                 distances
                 * np.sin(
                     angles
                     +
                     state.pose_theta_rad
+                    + LIDAR_YAW_OFFSET_RAD
                 )
             )
 
@@ -2176,14 +2292,16 @@ class RoboCupVisualizer(QMainWindow):
 
         self.localisation_label.setText(
             f"ENCODER:\n"
-            f"  dX:      {state.encoder_dx_m * 1000:7.1f} mm\n"
+            f"  counts:  {state.encoder_left_count:8d} / {state.encoder_right_count:8d}\n"
+            f"  left:    {state.encoder_left_delta_m * 1000:7.1f} mm\n"
+            f"  right:   {state.encoder_right_delta_m * 1000:7.1f} mm\n"
             f"  dTheta:  {math.degrees(state.encoder_dtheta_rad):7.2f}°\n"
-            f"FLOW:\n"
-            f"  dX:      {state.flow_dx_m * 1000:7.1f} mm\n"
-            f"  dY:      {state.flow_dy_m * 1000:7.1f} mm\n"
             f"IMU:\n"
             f"  dTheta:  {math.degrees(state.imu_dtheta_rad):7.2f}°\n"
-            f"  Heading: {state.imu_heading_deg:7.2f}°"
+            f"LiDAR match: {state.lidar_match_score:5.0f}/1000 "
+            f"accepted={int(state.lidar_correction_accepted)}\n"
+            f"  corr:    {state.lidar_dx_m*1000:6.1f}, {state.lidar_dy_m*1000:6.1f} mm "
+            f"{math.degrees(state.lidar_dtheta_rad):5.2f}°"
         )
 
         # ----------------------------------------------------
@@ -2227,6 +2345,40 @@ class RoboCupVisualizer(QMainWindow):
             f"UPTIME:    "
             f"{state.uptime_ms / 1000:.1f} s"
         )
+
+        if state.lidar_diag is None:
+            self.lidar_diag_label.setText("LiDAR: no diagnostics")
+        else:
+            d = state.lidar_diag
+            self.lidar_diag_label.setText(
+                f"LiDAR: {d['points']} pts, {d['angular_travel_deg']:.1f}° travel, "
+                f"{d['zero']} zero, {d['invalid']} invalid\n"
+                f"Range: {d['min_mm']}–{d['max_mm']} mm; "
+                f"direction anomalies: {d['direction_anomalies']}, "
+                f"large jumps: {d['large_angle_jumps']}"
+            )
+
+        if state.start_side is not None:
+            self.start_side = "LEFT" if state.start_side == 0 else "RIGHT"
+            flags = state.sensor_flags
+            self.sensor_label.setText(
+                f"LiDAR       {'OK' if flags & 1 else '--'}\n"
+                f"BNO055      {'OK' if flags & 2 else '--'}\n"
+                f"ToF         {'OK' if flags & 4 else '--'}\n"
+                f"Optical     {'OK' if flags & 8 else '--'}\n"
+                f"Ultrasonic  {'OK' if flags & 16 else '--'}"
+            )
+            self.motor_label.setText(
+                f"LEFT:  {state.motor_left:5d} ({state.left_rpm:6.1f} RPM)\n"
+                f"RIGHT: {state.motor_right:5d} ({state.right_rpm:6.1f} RPM)"
+            )
+            goal = str(state.goal_cell) if state.planner_goal_set else "--"
+            self.planner_label.setText(
+                f"STATE: {'FOLLOWING' if state.planner_goal_set else 'IDLE'}\n"
+                f"GOAL CELL: {goal}\n"
+                f"PATH: {state.status_path_length} cells\n"
+                f"GRID: {state.grid_w} x {state.grid_h}"
+            )
 
     # ========================================================
     # CLOSE

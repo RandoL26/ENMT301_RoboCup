@@ -1,4 +1,5 @@
 #include "seek_weight.h"
+#include "odometry_config.h"
 #include <math.h>
 
 /*************************************************************************
@@ -36,7 +37,7 @@
  *   2. Internal state ...... the variables the state remembers between calls
  *   3. Small helpers ....... angle wrap, clamp, slew limiter, cell <-> metres
  *   4. Lane plan ........... which grid cells to visit, in which order
- *   5. Sensors -> pose ..... IMU + encoders + optical flow -> MappingNav pose
+ *   5. Sensors -> pose ..... wheel encoders + IMU -> MappingNav pose
  *   6. Detector check ...... "did the target detector see a weight?"
  *   7. Sub-states .......... CALIBRATE -> PLAN -> DRIVE <-> TURN -> BRAKE -> PLAN ...
  *   8. Motor output ........ slew limiting + motor signs
@@ -79,39 +80,27 @@ static const float START_REAR_GAP_M = 0.020f;  // MEASURE ME: gap between robot'
 static const int8_t LEFT_MOTOR_SIGN  = +1;     // MEASURE ME
 static const int8_t RIGHT_MOTOR_SIGN = +1;     // MEASURE ME
 // Sign: -1 if that encoder's count FALLS when that side drives forward.
-static const int8_t LEFT_ENC_SIGN    = +1;     // MEASURE ME
-static const int8_t RIGHT_ENC_SIGN   = +1;     // MEASURE ME
+static const int8_t LEFT_ENC_SIGN    = OdometryConfig::LEFT_ENCODER_SIGN;
+static const int8_t RIGHT_ENC_SIGN   = OdometryConfig::RIGHT_ENCODER_SIGN;
 // Push the robot forward exactly 1 m by hand and read the count. 0 = "not measured":
-// the encoders are then ignored and the pose comes from optical flow only.
-static const float ENCODER_COUNTS_PER_M = 0.0f;  // MEASURE ME
+// encoder translation remains disabled until calibration is entered.
+static const float ENCODER_COUNTS_PER_M = OdometryConfig::ENCODER_COUNTS_PER_M;
 // Only used for encoder heading, which is weighted out by default (see HEADING_IMU_WEIGHT).
-static const float ENCODER_TRACK_M      = 0.0f;  // MEASURE ME (effective track width; larger than the real one on belts)
+static const float ENCODER_TRACK_M      = OdometryConfig::ENCODER_TRACK_M;
 
 // ---- Optical flow sensor --------------------------------------------------
 // mm per count lives on the OpticalFlow object: flow.setScaleMMPerCount(...).
 // Push the robot 1 m by hand and compare with the debug value flow_fwd_mm (summed).
-static const bool   FLOW_SWAP_XY   = false;    // MEASURE ME: true if sensor X is the robot's sideways axis
-static const int8_t FLOW_FWD_SIGN  = +1;       // MEASURE ME: +1 if the "forward" flow axis counts UP when driving forward
-static const int8_t FLOW_LEFT_SIGN = +1;       // MEASURE ME: +1 if the "sideways" flow axis counts UP when moving left
-// Where the sensor sits relative to the axle centre (forward / left positive).
-// Needed because turning on the spot moves an off-centre sensor over the floor.
-static const float  FLOW_OFFSET_FWD_M  = 0.0f; // MEASURE ME
-static const float  FLOW_OFFSET_LEFT_M = 0.0f; // MEASURE ME
-
 // ---- IMU ------------------------------------------------------------------
 // +1 if turning counter-clockwise (seen from above) makes imu.gyro_z INCREASE.
-static const int8_t IMU_YAW_SIGN = +1;         // MEASURE ME
+static const int8_t IMU_YAW_SIGN = OdometryConfig::IMU_YAW_SIGN;
 // A single 20 ms cycle cannot turn this far. If it "does", the IMU read failed -> ignore it.
 static const float  MAX_DTHETA_RAD = 0.5f;
 // After init the robot must stand STILL for this long. The gyro angle that builds up meanwhile
 // is pure bias (drift), which is then subtracted for the rest of the run.
 static const uint32_t IMU_BIAS_CAL_MS = 1500;
 
-// ---- How the pose sources are blended -------------------------------------
-// Translation: 1.0 = encoders only, 0.0 = optical flow only. (Ignored, treated as 0,
-// until ENCODER_COUNTS_PER_M is measured.) 0.5 is MappingNav's own default.
-static const float TRANSLATION_ENCODER_WEIGHT = 0.5f;
-// Heading: 1.0 = gyro only. Belt/skid steering slips, so encoder heading is not trusted.
+// Heading: gyro only by default; calibrated wheel geometry can provide fallback.
 static const float HEADING_IMU_WEIGHT = 1.0f;
 
 // ---- Search pattern (lanes) -----------------------------------------------
@@ -313,31 +302,28 @@ static void goalCell(uint16_t g, uint16_t &cx, uint16_t &cy) {
 // How the robot moved during ONE control cycle, in the robot body frame.
 struct StepMotion {
   float enc_dx_m;
+  float enc_left_delta_m;
+  float enc_right_delta_m;
   float enc_dtheta_rad;
-  float flow_dx_m;         // forward
-  float flow_dy_m;         // left
   float gyro_dtheta_rad;   // counter-clockwise positive
+  bool imu_valid;
   int   flow_counts_abs;   // |dx|+|dy| raw counts (used for stall detection)
 };
 
 static StepMotion readMotion(float dtS) {
-  StepMotion m = {0, 0, 0, 0, 0, 0};
+  StepMotion m = {0, 0, 0, 0, 0, false, 0};
 
   // --- IMU: heading change ------------------------------------------------
-  // NOTE: read_imu() returns the gyro as an ACCUMULATED ANGLE IN DEGREES in gyro_x/y/z
-  // (imu_sensor.h comment says rad/s, but the .cpp integrates it). We take the difference.
+  // read_imu() returns instantaneous angular velocity in rad/s.
   IMU_Data imu = read_imu();
-  float yawDeg = (float)IMU_YAW_SIGN * imu.gyro_z;
-  float dYawDeg = (yawDeg - prevYawDeg) - gyroBiasDegPerS * dtS;   // remove measured drift
-  float dYaw = dYawDeg * (float)DEG_TO_RAD;
-  if (fabsf(dYaw) > MAX_DTHETA_RAD) {
-    dbg.imu_glitches++;          // failed read returns zeros -> looks like a huge jump. Ignore it.
-    dYaw = 0.0f;                 // (prevYawDeg NOT updated, so the next good read is still correct)
-  } else {
-    prevYawDeg = yawDeg;
+  m.imu_valid = imu.gyro_valid;
+  float dYaw = imu.gyro_valid ? (float)IMU_YAW_SIGN * imu.gyro_z * dtS : 0.0f;
+  if (!imu.gyro_valid || fabsf(dYaw) > MAX_DTHETA_RAD) {
+    dbg.imu_glitches++;
+    dYaw = 0.0f;
   }
   m.gyro_dtheta_rad = dYaw;
-  dbg.gyro_yaw_deg = prevYawDeg;
+  dbg.gyro_yaw_deg += dYaw * (float)RAD_TO_DEG;
   dbg.bno_heading_deg = imu.euler_h;   // comparison only: BNO055 heading grows clockwise, gyro_z grows CCW
 
   // --- Encoders: forward distance and (weak) heading ---------------------
@@ -348,6 +334,8 @@ static StepMotion readMotion(float dtS) {
   if (ENCODER_COUNTS_PER_M > 0.0f) {
     float dL = (float)(encL - prevEncL) / ENCODER_COUNTS_PER_M;   // metres this cycle
     float dR = (float)(encR - prevEncR) / ENCODER_COUNTS_PER_M;
+    m.enc_left_delta_m = dL;
+    m.enc_right_delta_m = dR;
     m.enc_dx_m = 0.5f * (dL + dR);
     if (ENCODER_TRACK_M > 0.0f) m.enc_dtheta_rad = (dR - dL) / ENCODER_TRACK_M;
   }
@@ -360,33 +348,21 @@ static StepMotion readMotion(float dtS) {
   if (hw.flow->read(fx, fy)) {
     m.flow_counts_abs = (fx < 0 ? -fx : fx) + (fy < 0 ? -fy : fy);
     float mmPerCount = hw.flow->getScaleMMPerCount();
-    float rawA = (float)(FLOW_SWAP_XY ? fy : fx) * mmPerCount * 0.001f;   // metres
-    float rawB = (float)(FLOW_SWAP_XY ? fx : fy) * mmPerCount * 0.001f;
-    float sensorFwd  = (float)FLOW_FWD_SIGN  * rawA;   // how far the SENSOR moved over the floor
-    float sensorLeft = (float)FLOW_LEFT_SIGN * rawB;
-    // Turning by dTheta moves an off-centre sensor by dTheta x (-offsetLeft, offsetFwd).
-    // Remove that so what is left is the movement of the AXLE CENTRE.
-    m.flow_dx_m = sensorFwd  + m.gyro_dtheta_rad * FLOW_OFFSET_LEFT_M;
-    m.flow_dy_m = sensorLeft - m.gyro_dtheta_rad * FLOW_OFFSET_FWD_M;
   }
-  dbg.flow_fwd_mm = m.flow_dx_m * 1000.0f;
-  dbg.flow_left_mm = m.flow_dy_m * 1000.0f;
 
   return m;
 }
 
 static void updatePose(const StepMotion &m) {
   MappingNav::PoseUpdateInput in;
-  in.encoder_dx_m = m.enc_dx_m;
-  in.encoder_dy_m = 0.0f;                 // encoders cannot see sideways slip
+  in.encoder_left_delta_m = m.enc_left_delta_m;
+  in.encoder_right_delta_m = m.enc_right_delta_m;
   in.encoder_dtheta_rad = m.enc_dtheta_rad;
-  in.flow_dx_m = m.flow_dx_m;
-  in.flow_dy_m = m.flow_dy_m;
   in.imu_gyro_dtheta_rad = m.gyro_dtheta_rad;
-
-  // Until the encoders are calibrated, ignore them completely.
-  float wEnc = (ENCODER_COUNTS_PER_M > 0.0f) ? TRANSLATION_ENCODER_WEIGHT : 0.0f;
-  hw.map->updatePose(in, wEnc, HEADING_IMU_WEIGHT);
+  in.encoder_translation_valid = ENCODER_COUNTS_PER_M > 0.0f;
+  in.encoder_heading_valid = ENCODER_COUNTS_PER_M > 0.0f && ENCODER_TRACK_M > 0.0f;
+  in.imu_heading_valid = m.imu_valid;
+  hw.map->updatePose(in, HEADING_IMU_WEIGHT);
 
   Pose2D p = hw.map->getPose();
   dbg.x_m = p.x_m;
@@ -702,7 +678,7 @@ void seek_weight_init(const SeekHardware &hardware, SeekStartCorner corner) {
   memset(&targetReport, 0, sizeof(targetReport));
 
   // Warn about numbers that have not been measured yet.
-  if (ENCODER_COUNTS_PER_M <= 0.0f) Serial.println("[seek] WARNING: ENCODER_COUNTS_PER_M not set - encoders ignored, pose from optical flow only");
+  if (ENCODER_COUNTS_PER_M <= 0.0f) Serial.println("[seek] Encoder scale not calibrated - encoder translation disabled");
   if (AXLE_TO_REAR_M <= 0.0f)       Serial.println("[seek] WARNING: AXLE_TO_REAR_M invalid");
 
   // Start pose: on lane 0, facing the top of the arena (+y, i.e. 90 degrees).

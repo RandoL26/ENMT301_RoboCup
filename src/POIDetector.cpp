@@ -4,7 +4,6 @@
 // POI (Point of Interest / Weight) detection implementation
 
 #include "POIDetector.h"
-#include "Localisation.h"
 #include "MappingNav.h"
 #include <math.h>
 #include <string.h>
@@ -61,15 +60,13 @@ void POIDetector::reset() {
 // WORLD POSITION CALCULATION
 //====================================
 
-void POIDetector::calculateToFWorldPosition(const Localisation &loc,
+void POIDetector::calculateToFWorldPosition(const MappingNav &nav,
                                            float &out_x_m, float &out_y_m,
                                            float &out_yaw_rad) const {
-    RobotPose pose = loc.getPose();
-    
-    // Convert robot pose from mm to m
-    float robot_x_m = pose.x_mm / 1000.0f;
-    float robot_y_m = pose.y_mm / 1000.0f;
-    float robot_theta = pose.theta_rad;
+    const MappingNav::Pose2D pose = nav.getPose();
+    const float robot_x_m = pose.x_m;
+    const float robot_y_m = pose.y_m;
+    const float robot_theta = pose.theta_rad;
     
     // Transform sensor offset from robot frame to world frame
     // sensor_x_robot = m_extrinsics.x_offset_m (forward)
@@ -193,7 +190,7 @@ void POIDetector::calculateExpectedLiDARRange(const MappingNav &nav,
 // ANOMALY DETECTION
 //====================================
 
-void POIDetector::processAnomaly(const Localisation &loc, float tof_range_m,
+void POIDetector::processAnomaly(const MappingNav &nav, float tof_range_m,
                                   float expected_range_m, ExpectedRangeStatus status) {
     uint32_t now_ms = millis();
     
@@ -213,7 +210,7 @@ void POIDetector::processAnomaly(const Localisation &loc, float tof_range_m,
     
     // Calculate hit position in world frame
     float sensor_x_m, sensor_y_m, sensor_yaw_rad;
-    calculateToFWorldPosition(loc, sensor_x_m, sensor_y_m, sensor_yaw_rad);
+    calculateToFWorldPosition(nav, sensor_x_m, sensor_y_m, sensor_yaw_rad);
     
     float hit_x_m, hit_y_m;
     calculateToFHitPosition(sensor_x_m, sensor_y_m, sensor_yaw_rad, tof_range_m,
@@ -355,8 +352,7 @@ bool POIDetector::tryMergePOI(float x_m, float y_m, float confidence) {
 // PUBLIC API
 //====================================
 
-void POIDetector::update(const Localisation &localisation,
-                         const MappingNav &mappingNav,
+void POIDetector::update(const MappingNav &mappingNav,
                          float tofDistance_m) {
     uint32_t now_ms = millis();
     m_last_update_ms = now_ms;
@@ -375,7 +371,7 @@ void POIDetector::update(const Localisation &localisation,
     
     // Calculate ToF sensor world position
     float sensor_x_m, sensor_y_m, sensor_yaw_rad;
-    calculateToFWorldPosition(localisation, sensor_x_m, sensor_y_m, sensor_yaw_rad);
+    calculateToFWorldPosition(mappingNav, sensor_x_m, sensor_y_m, sensor_yaw_rad);
     
     // Get expected LiDAR range along beam
     float expected_range_m;
@@ -388,7 +384,7 @@ void POIDetector::update(const Localisation &localisation,
     m_diags.expected_status = expected_status;
     
     // Process anomaly detection
-    processAnomaly(localisation, tofDistance_m, expected_range_m, expected_status);
+    processAnomaly(mappingNav, tofDistance_m, expected_range_m, expected_status);
     
     // Update diagnostics
     m_diags.candidate_state = m_candidate.state;
