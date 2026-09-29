@@ -10,12 +10,6 @@ TOFSensorArray::TOFSensorArray(uint8_t numSensors, uint8_t ioExpanderAddr)
         xshutPins[i] = 0xFF; // invalid marker
         lastDistances[i] = 0;
         distanceOffsets[i] = 0;
-        historyCount[i] = 0;
-        historyIndex[i] = 0;
-
-        for (uint8_t j = 0; j < AVERAGE_SAMPLES; j++) {
-            distanceHistory[i][j] = 0;
-        }
     }
     
     // Create IO expander instance
@@ -244,8 +238,7 @@ TOFSensorArray::TOFData TOFSensorArray::readDistances() {
 
         if (timeout) {
             data.distances[i] = 0xFFFF;  // Mark timeout with max value
-            // Keep the previous filtered value so a single timeout does not
-            // immediately disturb consumers using getDistance().
+            lastDistances[i] = data.distances[i];
             continue;
         }
 
@@ -254,24 +247,8 @@ TOFSensorArray::TOFData TOFSensorArray::readDistances() {
             correctedDistance = 0;
         }
 
-        uint16_t corrected = (uint16_t)correctedDistance;
-
-        // Add the valid corrected reading to this sensor's rolling history.
-        distanceHistory[i][historyIndex[i]] = corrected;
-        historyIndex[i] = (historyIndex[i] + 1) % AVERAGE_SAMPLES;
-        if (historyCount[i] < AVERAGE_SAMPLES) {
-            historyCount[i]++;
-        }
-
-        // Average only the valid samples currently in the history.
-        uint32_t sum = 0;
-        for (uint8_t j = 0; j < historyCount[i]; j++) {
-            sum += distanceHistory[i][j];
-        }
-
-        uint16_t filteredDistance = uint16_t(sum / historyCount[i]);
-        data.distances[i] = filteredDistance;
-        lastDistances[i] = filteredDistance;
+        data.distances[i] = (uint16_t)correctedDistance;
+        lastDistances[i] = data.distances[i];
     }
     
     return data;
@@ -292,7 +269,7 @@ void TOFSensorArray::printDistances(const TOFData& data) {
         }
         
         if (i < data.sensorCount - 1) {
-            Serial.print("	");
+            Serial.print("\t");
         }
     }
     Serial.println();
