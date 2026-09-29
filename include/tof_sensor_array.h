@@ -11,6 +11,7 @@
 class TOFSensorArray {
 private:
     static const uint8_t MAX_SENSORS = 8;
+    static const uint8_t AVERAGE_SAMPLES = 5;
     
     uint8_t sensorCount;
     uint8_t xshutPins[MAX_SENSORS];
@@ -20,6 +21,11 @@ private:
     bool initialized;
     uint16_t lastDistances[MAX_SENSORS];
     int16_t distanceOffsets[MAX_SENSORS];
+
+    // Per-sensor rolling average history for noise filtering.
+    uint16_t distanceHistory[MAX_SENSORS][AVERAGE_SAMPLES];
+    uint8_t historyCount[MAX_SENSORS];
+    uint8_t historyIndex[MAX_SENSORS];
     
     // VL53L0X top sensor
     VL53L0X *topSensor;
