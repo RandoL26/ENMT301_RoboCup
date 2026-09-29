@@ -209,8 +209,10 @@ void proximity_sensor_callback(void) {
     proximitySensor.printStatus();
     if (!(proximitySensor.isObjectDetected())){
         collect_weight();
+        bigServo_move(168);
     } else {
         digitalWrite(ELECTROMAGNET_PIN, HIGH);
+        bigServo_move(169);
     }
 }
 
@@ -478,7 +480,7 @@ void handle_motor_line(const char* line, Print* ackPort) {
 
     int left = 0;
     int right = 0;
-
+    printBoth("processing command");
     if (sscanf(upperLine, "MOTOR %d %d", &left, &right) == 2) {
         left = constrain(left, -100, 100);
         right = constrain(right, -100, 100);
@@ -486,12 +488,13 @@ void handle_motor_line(const char* line, Print* ackPort) {
         cmd_left_motor = (int16_t)left;
         cmd_right_motor = (int16_t)right;
         cmd_last_rx_ms = millis();
-
+        printBoth("sent command");
         if (ackPort != nullptr) {
             ackPort->print("ACK MOTOR ");
             ackPort->print(cmd_left_motor);
             ackPort->print(" ");
             ackPort->println(cmd_right_motor);
+            printBoth("received command");
         }
         return;
     }
@@ -858,16 +861,16 @@ void task_init() {
   // taskManager.addTask(tRead_ultrasonic);   //reading ultrasonic 
   // taskManager.addTask(tRead_infrared);
   // taskManager.addTask(tRead_colour);
-  taskManager.addTask(tRead_imu);          //reading IMU
-    taskManager.addTask(tProximity_sensor);  //reading proximity sensor
+  //taskManager.addTask(tRead_imu);          //reading IMU
+    //taskManager.addTask(tProximity_sensor);  //reading proximity sensor
     // taskManager.addTask(tUltrasonic_sensor);  //reading ultrasonic sensor
     // taskManager.addTask(tColor_sensor);       //reading color sensor
     // taskManager.addTask(tIR_XY_Position);     //reading IR XY position sensor
     // taskManager.addTask(tVL53L1X_sensor);     //reading VL53L1X sensors
     //taskManager.addTask(tIR_Distance_sensor); //reading IR distance sensor (2Y0A02)  
     // taskManager.addTask(tSensor_average);
-    // taskManager.addTask(tDC_motor);          //DC motor control
-  // taskManager.addTask(tSet_motor); 
+    taskManager.addTask(tDC_motor);          //DC motor control
+  //taskManager.addTask(tSet_motor); 
   // taskManager.addTask(tWeight_scan);
   // taskManager.addTask(tCollect_weight);
   // taskManager.addTask(tReturn_to_base);
@@ -880,21 +883,21 @@ void task_init() {
     // taskManager.addTask(tHerkulexTest);
     // taskManager.addTask(tBT_stream_test);  // Disabled for control reliability
     // taskManager.addTask(tOpticalFlow);        //reading optical flow sensor
-    taskManager.addTask(tLD06_lidar);          //reading LD06 lidar
+    //taskManager.addTask(tLD06_lidar);          //reading LD06 lidar
     taskManager.addTask(tBig_Servo);
     //enable the tasks
   tRead_ultrasonic.enable();
   tRead_infrared.enable();
   tRead_colour.enable();
-  tRead_imu.enable();
-  tProximity_sensor.enable();
-  tUltrasonic_sensor.enable();
-  tColor_sensor.enable();
+  //tRead_imu.enable();
+  //tProximity_sensor.enable();
+  //tUltrasonic_sensor.enable();
+  //tColor_sensor.enable();
   tIR_XY_Position.enable();
-  tVL53L1X_sensor.enable();
+  //tVL53L1X_sensor.enable();
   tIR_Distance_sensor.enable();
   tSensor_average.enable();
-  //tDC_motor.enable();
+  tDC_motor.enable();
   //tSet_motor.enable();
   tWeight_scan.enable();
   tCollect_weight.enable();
@@ -904,7 +907,7 @@ void task_init() {
   //tBig_Servo.enable();
  //tCheck_watchdog.enable();
  //tVictory_dance.enable();
-   tHerkulexTest.enable();
+   //tHerkulexTest.enable();
     // tBT_stream_test.enable();  // Disabled for control reliability
     tOpticalFlow.enable();
     tLD06_lidar.enable();
