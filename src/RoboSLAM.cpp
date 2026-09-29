@@ -5,7 +5,6 @@
 
 namespace {
 const float PI_F = 3.14159265358979323846f;
-static constexpr uint16_t LIDAR_MATCH_STRIDE = 12;
 float wrapRad(float angle) {
   while (angle >= PI_F) angle -= 2.0f * PI_F;
   while (angle < -PI_F) angle += 2.0f * PI_F;
@@ -106,7 +105,7 @@ bool RoboSLAM::matchScan(LD06 &ld, float &dx, float &dy, float &dtheta,
         candidate.theta_rad =
             wrapRad(origin.theta_rad + ai * (5.0f * PI_F / 180.0f));
         uint16_t n = 0;
-        const float candidateScore = scorePose(ld, candidate, 8, n);
+        const float candidateScore = scorePose(ld, candidate, LIDAR_MATCH_STRIDE, n);
         if (n >= LIDAR_MATCH_MIN_POINTS && candidateScore > bestScore) {
           best = candidate;
           bestScore = candidateScore;
@@ -130,11 +129,6 @@ bool RoboSLAM::matchScan(LD06 &ld, float &dx, float &dy, float &dtheta,
         bestTested = n;
       }
     }
-
-    // Keep scan matching bounded. The previous implementation performed
-    // another 125 full scorePose() evaluations here to find a runner-up.
-    // That was too expensive for the real-time control loop.
-    const float runnerUp = baseline;
 
   dx = best.x_m - origin.x_m;
   dy = best.y_m - origin.y_m;
