@@ -199,7 +199,7 @@ float LD06::getAngleStep() {
   if (range < 0)
     range += 360.0f;
 
-  return range / LD06_PTS_PER_PACKETS;
+  return range / (LD06_PTS_PER_PACKETS - 1);
 }
 
 float LD06::getTimeStamp() {
@@ -228,12 +228,12 @@ uint16_t LD06::getChecksumFailCount() {
 */
 bool LD06::isChecksumOk() {
   static uint16_t previousChecksumFailCount = 0;
-  uint16_t checksumFailCount = getChecksumFailCount();
-  if (checksumFailCount != previousChecksumFailCount) {
-    checksumFailCount = previousChecksumFailCount;
-    return false;
+  const uint16_t checksumFailCount = getChecksumFailCount();
+  if (checksumFailCount == previousChecksumFailCount) {
+    return true;
   }
-  return true;
+  previousChecksumFailCount = checksumFailCount;
+  return false;
 }
 
 /* Points filter.

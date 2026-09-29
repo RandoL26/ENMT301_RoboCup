@@ -73,6 +73,11 @@ PACKET_HEARTBEAT = 0x04
 PACKET_SCAN = 0x05
 PACKET_DIAG = 0x06
 
+# Match the mounting extrinsics in RoboSLAM::processScan().
+LIDAR_OFFSET_X_M = 0.10
+LIDAR_OFFSET_Y_M = -0.04
+LIDAR_YAW_OFFSET_RAD = 0.0
+
 POSE_FMT = "<fffH"
 POSE_SIZE = struct.calcsize(POSE_FMT)
 KEYFRAME_META_FMT = "<HHHH"
@@ -379,7 +384,7 @@ class TelemetryReconstructor:
         if len(payload) < expected:
             return False
 
-        arr = np.frombuffer(payload[off:expected], dtype=np.float32)
+        arr = np.frombuffer(payload[off:expected], dtype="<f4")
         if arr.size != point_count * 2:
             return False
         pts = arr.reshape((-1, 2)).copy()
@@ -696,8 +701,14 @@ class LiveVisualizer:
             # Transform scan to world frame
             angles = state.lidar_points[:, 0]
             dists = state.lidar_points[:, 1]
-            xs = state.pose_x_m + dists * np.cos(angles + state.pose_theta_rad)
-            ys = state.pose_y_m + dists * np.sin(angles + state.pose_theta_rad)
+            theta = state.pose_theta_rad
+            lidar_x = (state.pose_x_m + LIDAR_OFFSET_X_M * np.cos(theta)
+                       - LIDAR_OFFSET_Y_M * np.sin(theta))
+            lidar_y = (state.pose_y_m + LIDAR_OFFSET_X_M * np.sin(theta)
+                       + LIDAR_OFFSET_Y_M * np.cos(theta))
+            world_angles = angles + theta + LIDAR_YAW_OFFSET_RAD
+            xs = lidar_x + dists * np.cos(world_angles)
+            ys = lidar_y + dists * np.sin(world_angles)
 
             # Compute centroid of current scan in local frame and record
             try:
