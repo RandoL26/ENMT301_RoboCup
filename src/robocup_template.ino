@@ -685,6 +685,11 @@ void ir_distance_sensor_callback(void) {
 
 // Task wrapper for IMU reading
 void imu_task_callback(void) {
+    if (!telemetry_imu_ok) {
+        current_imu_data.gyro_valid = false;
+        return;
+    }
+
     current_imu_data = read_imu();
     // Print tidy IMU headings (relative to startup) and accelerations
     float heading_rel = current_imu_data.euler_h - imu_heading_offset;
@@ -801,12 +806,20 @@ void dc_motor_callback(void) {
             target_navigation_active = true;
         }
 
+        // Do not begin or continue a blind in-place scan without gyro feedback.
+        // Resume straight/path motion instead of rotating indefinitely.
+        if (autonomous_scan_active && !current_imu_data.gyro_valid) {
+            autonomous_scan_active = false;
+            autonomous_last_scan_ms = now;
+        }
+
         if (visualiser_path_preview_active && !target_navigation_active &&
             !autonomous_scan_active &&
             now - autonomous_last_scan_ms < AUTONOMOUS_SCAN_INTERVAL_MS) {
             autonomous_scan_active = false;
-        } else if (autonomous_scan_active ||
-                   now - autonomous_last_scan_ms >= AUTONOMOUS_SCAN_INTERVAL_MS) {
+        } else if (current_imu_data.gyro_valid &&
+                   (autonomous_scan_active ||
+                    now - autonomous_last_scan_ms >= AUTONOMOUS_SCAN_INTERVAL_MS)) {
             if (!autonomous_scan_active) {
                 autonomous_scan_active = true;
                 autonomous_scan_rotation_rad = 0.0f;
@@ -881,6 +894,16 @@ void dc_motor_callback(void) {
                         (int)(heading_error * 22.0f), -18, 18);
                     left_target = forward_speed - correction;
                     right_target = forward_speed + correction;
+                }
+            } else {
+                // If there is no goal yet or path planning is still producing
+                // one, start with a slow straight command. A one-cell path
+                // means the goal has been reached, so hold position then.
+                // The LiDAR interlock below stops motion for stale scans or
+                // an obstacle ahead.
+                if (!mappingNav.isGoalSet() || mappingNav.getPathLength() == 0) {
+                    left_target = 80;
+                    right_target = 80;
                 }
             }
         }
@@ -1340,22 +1363,21 @@ void setup() {
   robot_init();        // robot_init() calls BNO_Init() which needs I2C
   task_init();
   bigServo_setup();
-  if (telemetry_imu_ok) {
-    // Start autonomous mode after sensor, motor, pose, and task initialization.
-    // If the required IMU did not initialize, keep the drivetrain stopped.
-    const unsigned long now = millis();
-    cmd_left_motor = 0;
-    cmd_right_motor = 0;
-    applied_left_motor = 0;
-    applied_right_motor = 0;
-    target_navigation_active = false;
-    exploration_goal_needs_update = true;
-    visualiser_path_preview_active = false;
-    autonomous_scan_active = false;
-    autonomous_last_scan_ms = now;
-    robotStarted = true;
-    printlnBoth("POWER-ON AUTONOMY STARTED");
-  }
+  // Power-on is the start command: do not gate autonomous mode on D25 or IMU
+  // telemetry status. RoboSLAM ignores invalid IMU samples and can still use
+  // encoder odometry; LiDAR continues to guard every nonzero motor command.
+  const unsigned long now = millis();
+  cmd_left_motor = 0;
+  cmd_right_motor = 0;
+  applied_left_motor = 0;
+  applied_right_motor = 0;
+  target_navigation_active = false;
+  exploration_goal_needs_update = true;
+  visualiser_path_preview_active = false;
+  autonomous_scan_active = false;
+  autonomous_last_scan_ms = now;
+  robotStarted = true;
+  printlnBoth("POWER-ON AUTONOMY STARTED");
   // Now that Bluetooth is initialized, send startup message
   if (bluetooth.isInitialized()) {
     bluetooth.println("Setup Complete");
@@ -1554,29 +1576,6 @@ void robot_init() {
         bno055_get_magcalib_status(&mag_cal);
         printfBoth("BNO055 calib status - SYS:%u GYR:%u ACC:%u MAG:%u\n", sys_cal, gyr_cal, acc_cal, mag_cal);
         
-        printlnBoth("Initialising DC Motor...");
-        driveMotor.begin();
-        // Initialize RoboSLAM baseline (read initial encoder/flow/imu state)
-        roboSlam.begin();
-        setRobotStartPosition();
-        
-        // Initialize POI detection system
-        printlnBoth("Initialising POI Detector...");
-        // CALIBRATION REQUIRED: Measure your robot's ToF mounting offset
-        tof_extrinsics.x_offset_m = 0.0f;   // TODO: measure forward offset from robot center
-        tof_extrinsics.y_offset_m = 0.0f;   // TODO: measure lateral offset
-        tof_extrinsics.yaw_offset_rad = 0.0f;  // TODO: measure sensor yaw angle
-        poiDetector.begin(tof_extrinsics);
-        tofCoverageMap.begin();
-        searchPlanner.begin();
-        
-        // Initialize telemetry over USB Serial unless running a text-only sensor test.
-#if !OPTICAL_FLOW_SERIAL_TEST
-        telemetry_init(Serial);
-        binary_telemetry_active = true;
-#endif
-        
-        printlnBoth("Robot is ready \n");
     } else {
 
         telemetry_imu_ok = false;
@@ -1586,6 +1585,30 @@ void robot_init() {
             init_result
         );
     }
+
+    // These systems must be initialized even when the IMU is unavailable:
+    // the scheduler still needs a live motor driver and an exploration map.
+    // RoboSLAM will use valid encoder deltas and reject invalid IMU samples.
+    printlnBoth("Initialising DC Motor...");
+    driveMotor.begin();
+    roboSlam.begin();
+    setRobotStartPosition();
+
+    printlnBoth("Initialising POI Detector...");
+    tof_extrinsics.x_offset_m = 0.0f;   // TODO: measure forward offset from robot center
+    tof_extrinsics.y_offset_m = 0.0f;   // TODO: measure lateral offset
+    tof_extrinsics.yaw_offset_rad = 0.0f;  // TODO: measure sensor yaw angle
+    poiDetector.begin(tof_extrinsics);
+    tofCoverageMap.begin();
+    searchPlanner.begin();
+
+    // Initialize telemetry over USB Serial unless running a text-only sensor test.
+#if !OPTICAL_FLOW_SERIAL_TEST
+    telemetry_init(Serial);
+    binary_telemetry_active = true;
+#endif
+
+    printlnBoth("Robot is ready \n");
 }
 
 //**********************************************************************************
@@ -1626,28 +1649,28 @@ void task_init() {
     // taskManager.addTask(tLidarFrontTest); // Disabled to avoid debug spam.
     // taskManager.addTask(tLocalisation);        //sensor fusion localisation update
     taskManager.addTask(tPosePrediction);
-    // taskManager.addTask(tPOI_Detector);        //POI detection from ToF
-    // taskManager.addTask(tToF_SearchPlanner);   //search target generation
+    taskManager.addTask(tPOI_Detector);        //POI detection from ToF
+    taskManager.addTask(tToF_SearchPlanner);   //search target generation
     //taskManager.addTask(tBig_Servo);
     //enable the tasks
-  tRead_ultrasonic.enable();
-  tRead_infrared.enable();
-  tRead_colour.enable();
+//   tRead_ultrasonic.enable();
+//   tRead_infrared.enable();
+//   tRead_colour.enable();
   tRead_imu.enable();
   //tProximity_sensor.enable();
   //tUltrasonic_sensor.enable();
   //tColor_sensor.enable();
   //tIR_XY_Position.enable();
   tVL53L1X_sensor.enable();
-  tIR_Distance_sensor.enable();
-  tSensor_average.enable();
+//   tIR_Distance_sensor.enable();
+//   tSensor_average.enable();
   tDC_motor.enable();
   //tSet_motor.enable();
-  tWeight_scan.enable();
+//   tWeight_scan.enable();
 //   tCollect_weight.enable();
-  tReturn_to_base.enable();
-  tDetect_base.enable();
-  tUnload_weights.enable();
+//   tReturn_to_base.enable();
+//   tDetect_base.enable();
+//   tUnload_weights.enable();
   //tBig_Servo.enable();
 //   tCheck_watchdog.enable();
 //   tVictory_dance.enable();

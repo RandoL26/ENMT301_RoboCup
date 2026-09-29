@@ -32,6 +32,13 @@ extern OpticalFlow opticalFlow;
 
 static IntervalTimer gControlTimer;
 
+// Keep MotorControl's positive=forward convention while correcting the
+// reversed polarity at the motor-driver output boundary.
+static int16_t applyMotorInputSign(int16_t speed) {
+    if (speed < -100 || speed > 100) return speed; // leave invalid values for DCMotor to reject
+    return (int16_t)-speed;
+}
+
 // Print the current runtime tuning values.
 void motorControlPrintPidConfig(Stream& serial) {
     serial.println("PID CONFIG:");
@@ -528,8 +535,8 @@ void MotorControl::begin(void) {
                 int16_t cmdL = (int16_t)constrain((int)roundf(lOut), -100, 100);
                 int16_t cmdR = (int16_t)constrain((int)roundf(rOut), -100, 100);
 
-                gMotorControlInstance->leftMotor.setSpeed(cmdL);
-                gMotorControlInstance->rightMotor.setSpeed(cmdR);
+                gMotorControlInstance->leftMotor.setSpeed(applyMotorInputSign(cmdL));
+                gMotorControlInstance->rightMotor.setSpeed(applyMotorInputSign(cmdR));
             }
         }, us);
     }
@@ -624,11 +631,11 @@ void MotorControl::setAdaptiveOffset(uint8_t magnitude, int8_t offset) {
 }
 
 void MotorControl::setLeft(int16_t speed) {
-    leftMotor.setSpeed(speed);
+    leftMotor.setSpeed(applyMotorInputSign(speed));
 }
 
 void MotorControl::setRight(int16_t speed) {
-    rightMotor.setSpeed(speed);
+    rightMotor.setSpeed(applyMotorInputSign(speed));
 }
 
 void MotorControl::setSpeeds(int16_t leftSpeed, int16_t rightSpeed) {
@@ -642,8 +649,8 @@ void MotorControl::setSpeeds(int16_t leftSpeed, int16_t rightSpeed) {
     }
     
     applyStraightSpeedSync(leftSpeed, rightSpeed);
-    leftMotor.setSpeed(leftSpeed);
-    rightMotor.setSpeed(rightSpeed);
+    leftMotor.setSpeed(applyMotorInputSign(leftSpeed));
+    rightMotor.setSpeed(applyMotorInputSign(rightSpeed));
 }
 
 int32_t MotorControl::getLeftEncoderPulses(void) const {
@@ -655,13 +662,13 @@ int32_t MotorControl::getRightEncoderPulses(void) const {
 }
 
 void MotorControl::turnLeft(void) {
-    leftMotor.setSpeed(-100);
-    rightMotor.setSpeed(100);
+    leftMotor.setSpeed(applyMotorInputSign(-100));
+    rightMotor.setSpeed(applyMotorInputSign(100));
 }
 
 void MotorControl::turnRight(void) {
-    leftMotor.setSpeed(100);
-    rightMotor.setSpeed(-100);
+    leftMotor.setSpeed(applyMotorInputSign(100));
+    rightMotor.setSpeed(applyMotorInputSign(-100));
 }
 
 bool MotorControl::turnToAngle(float targetAngleDeg,

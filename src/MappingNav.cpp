@@ -19,6 +19,10 @@ const float ROBOT_WIDTH_M  = 0.210f;
 // Additional safety clearance around the robot.
 const float ROBOT_SAFETY_MARGIN_M = 0.030f;
 
+// D* Lite resumes from its existing state on the next bounded replan call.
+// Keep any one pass short so the cooperative scheduler can service motors.
+static const uint32_t MAX_REPLAN_ITERATIONS = 1024UL;
+
 MappingNav::MappingNav() {
   reset();
 }
@@ -264,7 +268,7 @@ bool MappingNav::replanPath(float robot_radius_m) {
     }
   }
 
-  if (!computeShortestPath(NUM_CELLS * 20UL)) {
+  if (!computeShortestPath(MAX_REPLAN_ITERATIONS)) {
     m_path_len = 0;
     return false;
   }
@@ -1000,7 +1004,9 @@ bool MappingNav::computeShortestPath(uint32_t max_iterations) {
     ++iter;
   }
 
-  return (m_g[m_start_idx] < INF * 0.5f);
+  // The iteration budget was exhausted. Do not expose a tentative path;
+  // the next replanPath() call will continue processing the open list.
+  return false;
 }
 
 bool MappingNav::extractPath() {
