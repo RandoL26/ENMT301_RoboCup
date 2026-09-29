@@ -67,6 +67,8 @@
 
 #define LOCALISATION_DEBUG 0
 
+#define OPTICAL_FLOW_SERIAL_TEST 0
+
 //**********************************************************************************
 // Local Definitions
 //**********************************************************************************
@@ -371,7 +373,7 @@ void optical_flow_callback(void) {
                     totalX, totalY);
         #endif
         // Update localisation with optical flow
-        localisation.updateOpticalFlow(opticalFlow);
+        // localisation.updateOpticalFlow(opticalFlow);
     }
 }
 
@@ -411,29 +413,30 @@ void lidar_front_test_callback(void) {
 }
 
 // Task wrapper for localisation sensor fusion update
-void localisation_update_callback(void) {
-    // Perform sensor fusion (prediction from IMU + flow)
-    localisation.updateFromSensors();
+// void localisation_update_callback(void) {
+//     // Perform sensor fusion (prediction from IMU + flow)
+//     localisation.updateFromSensors();
     
-    // Optional: print diagnostics periodically (every 1000 ms)
-    static unsigned long last_diag_print = 0;
-    unsigned long now = millis();
-    if (now - last_diag_print >= 1000) {
-        last_diag_print = now;
+//     // Optional: print diagnostics periodically (every 1000 ms)
+//     static unsigned long last_diag_print = 0;
+//     unsigned long now = millis();
+//     if (now - last_diag_print >= 1000) {
+//         last_diag_print = now;
         
-        // Print fused localisation state
-        RobotPose pose = localisation.getPose();
-        LocalisationDiags diags = localisation.getDiags();
-        #if LOCALISATION_DEBUG
-        printfBoth("LOCALISATION: x=%.1f mm, y=%.1f mm, theta=%.3f rad | "
-                   "flow: dx=%.1f, dy=%.1f | "
-                   "lidar_match=%u, accepted=%u, frames=%lu\n",
-                   pose.x_mm, pose.y_mm, pose.theta_rad,
-                   diags.flow_dx_mm, diags.flow_dy_mm,
-                   diags.lidar_match_score, diags.lidar_correction_accepted,
-                   diags.frame_count);
-        #endif
-    }
+//         // Print fused localisation state
+//         RobotPose pose = localisation.getPose();
+//         LocalisationDiags diags = localisation.getDiags();
+//         #if LOCALISATION_DEBUG
+//         printfBoth("LOCALISATION: x=%.1f mm, y=%.1f mm, theta=%.3f rad | "
+//                    "flow: dx=%.1f, dy=%.1f | "
+//                    "lidar_match=%u, accepted=%u, frames=%lu\n",
+//                    pose.x_mm, pose.y_mm, pose.theta_rad,
+//                    diags.flow_dx_mm, diags.flow_dy_mm,
+//                    diags.lidar_match_score, diags.lidar_correction_accepted,
+//                    diags.frame_count);
+//         #endif
+//     }
+// }
 // 100 Hz authoritative pose prediction task
 void pose_prediction_callback(void) {
     roboSlam.updatePrediction(current_imu_data, millis());
@@ -500,7 +503,7 @@ void poi_detector_callback(void) {
         float tof_distance_m = (tofData.sensorCount > 0) ? (tofData.distances[0] / 1000.0f) : 0.0f;
         
         // Update POI detector with fused pose and occupancy map
-        poiDetector.update(localisation, mappingNav, tof_distance_m);
+        poiDetector.update(mappingNav, tof_distance_m);
         
         // Update ToF coverage map if reading is valid
         if (tof_distance_m > 0.0f) {
@@ -1228,9 +1231,6 @@ void robot_init() {
         targetConfig.minimumSeparateLidarPoints = 3;
         targetConfig.separateObstacleDistanceMm = 100;
         targetConfig.lidarClusterRadiusMm = 80;
-        targetConfig.useSeparateObstacleAngleGate = true;
-        targetConfig.separateObstacleAngleMinDeg = -90.0f;
-        targetConfig.separateObstacleAngleMaxDeg = 90.0f;
         targetDetector.setConfig(targetConfig);
     
     printlnBoth("Initialising IMU (BNO055)...");
@@ -1329,7 +1329,8 @@ void task_init() {
     taskManager.addTask(tOpticalFlow);        //reading optical flow sensor
     taskManager.addTask(tLD06_lidar);          //reading LD06 lidar
     taskManager.addTask(tLidarFrontTest);
-    taskManager.addTask(tLocalisation);        //sensor fusion localisation update
+    // taskManager.addTask(tLocalisation);        //sensor fusion localisation update
+    taskManager.addTask(tPosePrediction);
     // taskManager.addTask(tPOI_Detector);        //POI detection from ToF
     // taskManager.addTask(tToF_SearchPlanner);   //search target generation
     //taskManager.addTask(tBig_Servo);
@@ -1348,7 +1349,7 @@ void task_init() {
   tDC_motor.enable();
   //tSet_motor.enable();
   tWeight_scan.enable();
-  tCollect_weight.enable();
+//   tCollect_weight.enable();
   tReturn_to_base.enable();
   tDetect_base.enable();
   tUnload_weights.enable();
@@ -1361,7 +1362,7 @@ void task_init() {
     tOpticalFlow.enable();
     tLD06_lidar.enable();
     tLidarFrontTest.enable();
-    tLocalisation.enable();
+    tPosePrediction.enable();
     tPOI_Detector.enable();
     tToF_SearchPlanner.enable();
 
@@ -1415,13 +1416,13 @@ void send_robot_status_telemetry()
 //**********************************************************************************
 // put your main code here, to run repeatedly
 //**********************************************************************************
-// void loop() {
+void loop() {
     
-//     checkStartButton();
-//     process_bluetooth_motor_commands();
-//     process_usb_motor_commands();
+    checkStartButton();
+    process_bluetooth_motor_commands();
+    process_usb_motor_commands();
 
-//     taskManager.execute();
+    taskManager.execute();
 
     static unsigned long last_status_ms = 0;
     static unsigned long last_hb_ms = 0;
@@ -1446,17 +1447,17 @@ void send_robot_status_telemetry()
         last_status_ms = now;
     }
 
-//     if (now - last_hb_ms >= 1000) {
-//         telemetry_send_heartbeat(now, 0, 0);
-//         telemetry_send_diag_scan();
+    if (now - last_hb_ms >= 1000) {
+        telemetry_send_heartbeat(now, 0, 0);
+        telemetry_send_diag_scan();
 
-//         last_hb_ms = now;
-//     }
+        last_hb_ms = now;
+    }
 
-//     if (now - last_pose_ms >= 200) {
-//         telemetry_send_pose_and_path(mappingNav);
-//         last_pose_ms = now;
-//     }
+    if (now - last_pose_ms >= 200) {
+        telemetry_send_pose_and_path(mappingNav);
+        last_pose_ms = now;
+    }
 
     if (now - last_grid_ms >= 1500) {
         telemetry_send_grid_keyframe(mappingNav);
