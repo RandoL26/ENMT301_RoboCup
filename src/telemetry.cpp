@@ -36,15 +36,11 @@ uint16_t g_ld_angle_of_max_delta_cdeg = 0; // centi-degrees 0..36000
 uint16_t g_ld_angle_diff_mean_cdeg = 0;
 uint16_t g_ld_angle_diff_std_cdeg = 0;
 
-// CRC16-CCITT (poly 0x1021) initial 0xFFFF
-static uint16_t crc16_ccitt(const uint8_t *data, size_t len) {
-  uint16_t crc = 0xFFFF;
-  for (size_t i = 0; i < len; ++i) {
-    crc ^= ((uint16_t)data[i]) << 8;
-    for (uint8_t j = 0; j < 8; ++j) {
-      if (crc & 0x8000) crc = (crc << 1) ^ 0x1021;
-      else crc <<= 1;
-    }
+// Incremental CRC16-CCITT update (poly 0x1021).
+static uint16_t crc16_update(uint16_t crc, uint8_t byte) {
+  crc ^= ((uint16_t)byte) << 8;
+  for (uint8_t bit = 0; bit < 8; ++bit) {
+    crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021) : (uint16_t)(crc << 1);
   }
   return crc;
 }
@@ -67,26 +63,26 @@ static void write_le_f32(Stream &s, float f) {
 }
 
 static void build_header_and_crc(uint8_t version, uint8_t ptype, uint16_t seq, uint16_t payload_len, const uint8_t *payload, uint8_t *out_header_crc, size_t &out_len) {
-  // header: version(1) type(1) seq(2) payload_len(2)
-  // CRC is computed over header+payload
-  size_t header_len = 6;
-  size_t total = header_len + payload_len;
-  uint8_t *tmp = (uint8_t*)malloc(total);
-  tmp[0] = version;
-  tmp[1] = ptype;
-  tmp[2] = (uint8_t)(seq & 0xFF);
-  tmp[3] = (uint8_t)((seq >> 8) & 0xFF);
-  tmp[4] = (uint8_t)(payload_len & 0xFF);
-  tmp[5] = (uint8_t)((payload_len >> 8) & 0xFF);
-  if (payload_len && payload) memcpy(tmp + header_len, payload, payload_len);
-  uint16_t crc = crc16_ccitt(tmp, total);
+  // Build the header and calculate CRC incrementally without a temporary
+  // heap allocation for each telemetry frame.
+  out_header_crc[0] = version;
+  out_header_crc[1] = ptype;
+  out_header_crc[2] = (uint8_t)(seq & 0xFF);
+  out_header_crc[3] = (uint8_t)((seq >> 8) & 0xFF);
+  out_header_crc[4] = (uint8_t)(payload_len & 0xFF);
+  out_header_crc[5] = (uint8_t)((payload_len >> 8) & 0xFF);
+  uint16_t crc = 0xFFFF;
+  for (uint8_t i = 0; i < 6; ++i) {
+    crc = crc16_update(crc, out_header_crc[i]);
+  }
+  for (uint16_t i = 0; i < payload_len && payload; ++i) {
+    crc = crc16_update(crc, payload[i]);
+  }
   // return header+crc in out_header_crc (caller must be ready for 8 bytes)
   // layout: header(6) crc(2)
-  out_header_crc[0] = tmp[0]; out_header_crc[1] = tmp[1]; out_header_crc[2] = tmp[2]; out_header_crc[3] = tmp[3]; out_header_crc[4] = tmp[4]; out_header_crc[5] = tmp[5];
   out_header_crc[6] = (uint8_t)(crc & 0xFF);
   out_header_crc[7] = (uint8_t)((crc >> 8) & 0xFF);
   out_len = 8;
-  free(tmp);
 }
 
 static void send_frame(uint8_t version, uint8_t ptype, const uint8_t *payload, uint16_t payload_len) {
@@ -260,49 +256,30 @@ void telemetry_send_grid_keyframe(const MappingNav &nav) {
 
 void telemetry_send_downsampled_scan(LD06 &ld06, const MappingNav &nav, uint16_t max_points) {
   uint16_t nb = ld06.getNbPointsInScan();
-  if (nb == 0) return;
-  // New strategy: select up to max_points output samples by target-angle bins.
-  // This selects the nearest measured beam to each target angle, producing
-  // stable angular coverage even when the raw scan point count varies.
-  uint16_t pcount = (nb < max_points) ? nb : max_points;
-  uint16_t payload_len = 2 + pcount * 8;
-  uint8_t *payload = (uint8_t*)malloc(payload_len);
-  uint8_t *ptr = payload;
-  
-  // Read all points into temporary arrays (angles in radians, distances in meters)
-  float *angles = (float*)malloc(sizeof(float) * nb);
-  float *dists = (float*)malloc(sizeof(float) * nb);
-  for (uint16_t i = 0; i < nb; ++i) {
-    DataPoint *pt = ld06.getPoints(i);
-    if (!pt) {
-      angles[i] = 0.0f;
-      dists[i] = 0.0f;
-    } else {
-      angles[i] = pt->angle * (PI / 180.0f);
-      dists[i] = ((float)pt->distance) / 1000.0f;
-    }
+  constexpr uint16_t MAX_SCAN_TELEMETRY_POINTS = 60;
+  static uint8_t payload[2 + MAX_SCAN_TELEMETRY_POINTS * 8];
+  if (nb == 0 || max_points == 0) return;
+  if (max_points > MAX_SCAN_TELEMETRY_POINTS) {
+    max_points = MAX_SCAN_TELEMETRY_POINTS;
   }
+  const uint16_t pcount = (nb < max_points) ? nb : max_points;
+  const uint16_t payload_len = 2 + pcount * 8;
+  uint8_t *ptr = payload;
   // Diagnostics are computed once per completed raw scan by
   // `telemetry_update_ld06_diagnostics()` called from the LD06 driver.
   // Here we simply reuse the last-computed LD06 diagnostics globals.
   // point_count u16
   *ptr++ = (uint8_t)(pcount & 0xFF); *ptr++ = (uint8_t)((pcount >> 8) & 0xFF);
-  // Reuse the `angles`/`dists` arrays populated above (no need to re-read points)
-
-  // Downsampling: sample by dividing the raw scan into pcount index bins
-  // (legacy/index-stride behavior). For each output slot pick the point at
-  // index = floor(out * nb / pcount).
+  // Sample evenly across the completed scan without allocating temporary arrays.
   for (uint16_t out = 0; out < pcount; ++out) {
     uint16_t idx = (uint16_t)(((uint32_t)out * (uint32_t)nb) / (uint32_t)pcount);
     if (idx >= nb) idx = nb - 1;
-    float a = angles[idx];
-    float r = dists[idx];
+    const DataPoint *pt = ld06.getPoints(idx);
+    const float a = pt->angle * (PI / 180.0f);
+    const float r = ((float)pt->distance) / 1000.0f;
     memcpy(ptr, &a, 4); ptr += 4;
     memcpy(ptr, &r, 4); ptr += 4;
   }
-
-  free(angles);
-  free(dists);
 
   // Update legacy diagnostic counters
   g_scan_packet_count++;
@@ -313,7 +290,6 @@ void telemetry_send_downsampled_scan(LD06 &ld06, const MappingNav &nav, uint16_t
   scan_telemetry_sent_count++;
 
   send_frame(1, 0x05, payload, payload_len);
-  free(payload);
 }
 
 // Diagnostic packet: layout (little-endian):

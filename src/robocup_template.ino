@@ -176,6 +176,7 @@ bool telemetry_imu_ok = false;
 bool telemetry_tof_ok = false;
 bool telemetry_optical_flow_ok = false;
 bool telemetry_ultrasonic_ok = false;
+bool binary_telemetry_active = false;
 
 
 bool robotStarted = false;
@@ -420,7 +421,9 @@ void vl53l1x_sensor_callback(void) {
 
     TOFSensorArray::TOFData tofData =
         tofSensorArray.readDistances();
+    (void)tofData; // Reading updates the array cache used by targetDetector.
 
+#if TELEMETRY_ALLOW_ASCII_TELEPLOT
     Serial.print("\t");
 
     for (uint8_t i = 0; i < tofData.sensorCount; i++) {
@@ -466,6 +469,7 @@ void vl53l1x_sensor_callback(void) {
             Serial.println("\tX8:ERR");
         }
     }
+#endif
 }
 
 // Task wrapper for POI detector (processes ToF readings)
@@ -615,7 +619,9 @@ void dc_motor_callback(void) {
     // Latch behavior: hold last commanded speeds until changed
     driveMotor.setSpeeds(applied_left_motor, applied_right_motor);
 
-    // Print encoder pulse counts to USB serial at a limited rate
+    // Print encoder counts only when ASCII diagnostics are enabled. The USB
+    // serial port otherwise carries framed binary telemetry.
+#if TELEMETRY_ALLOW_ASCII_TELEPLOT
     static unsigned long lastEncoderPrintMs = 0;
     const unsigned long encoderPrintPeriodMs = 200;
     unsigned long now = millis();
@@ -627,6 +633,7 @@ void dc_motor_callback(void) {
         Serial.println(driveMotor.getRightEncoderPulses());
         lastEncoderPrintMs = now;
     }
+#endif
 }
 
 int16_t slew_toward(int16_t current, int16_t target, int16_t step) {
@@ -914,14 +921,18 @@ void task_init();
 
 // Helper functions to stream output to both Serial and Bluetooth
 void printBoth(const char* data) {
-    Serial.print(data);
+    if (!binary_telemetry_active || TELEMETRY_ALLOW_ASCII_TELEPLOT) {
+        Serial.print(data);
+    }
     if (bluetooth.isInitialized()) {
         bluetooth.print(data);
     }
 }
 
 void printlnBoth(const char* data) {
-    Serial.println(data);
+    if (!binary_telemetry_active || TELEMETRY_ALLOW_ASCII_TELEPLOT) {
+        Serial.println(data);
+    }
     if (bluetooth.isInitialized()) {
         bluetooth.println(data);
     }
@@ -931,11 +942,13 @@ void printfBoth(const char* format, ...) {
     char buffer[256];
     va_list args;
     
-    // Print to Serial
-    va_start(args, format);
-    vsnprintf(buffer, sizeof(buffer), format, args);
-    va_end(args);
-    Serial.print(buffer);
+    // Once framed telemetry is active, keep diagnostic text off USB Serial.
+    if (!binary_telemetry_active || TELEMETRY_ALLOW_ASCII_TELEPLOT) {
+        va_start(args, format);
+        vsnprintf(buffer, sizeof(buffer), format, args);
+        va_end(args);
+        Serial.print(buffer);
+    }
     
     // Print to Bluetooth
     if (bluetooth.isInitialized()) {
@@ -957,8 +970,8 @@ void setRobotStartPosition()
         );
 
         localisation.resetPose(
-            START_LEFT_X_M,
-            START_LEFT_Y_M,
+            START_LEFT_X_M * 1000.0f,
+            START_LEFT_Y_M * 1000.0f,
             START_LEFT_THETA_RAD
         );
     }
@@ -971,8 +984,8 @@ void setRobotStartPosition()
         );
 
         localisation.resetPose(
-            START_RIGHT_X_M,
-            START_RIGHT_Y_M,
+            START_RIGHT_X_M * 1000.0f,
+            START_RIGHT_Y_M * 1000.0f,
             START_RIGHT_THETA_RAD
         );
     }
@@ -1005,7 +1018,7 @@ void checkStartButton() {
                 applied_left_motor = 0;
                 applied_right_motor = 0;
 
-                Serial.println("START BUTTON PRESSED - MAP/POSE RESET - ROBOT STARTED");
+                printlnBoth("START BUTTON PRESSED - MAP/POSE RESET - ROBOT STARTED");
             }
         }
     }
@@ -1251,6 +1264,7 @@ void robot_init() {
         
         // Initialize telemetry over USB Serial
         telemetry_init(Serial);
+        binary_telemetry_active = true;
         
         printlnBoth("Robot is ready \n");
     } else {
@@ -1274,44 +1288,22 @@ void task_init() {
  
   // Register each active task before enabling it. The ultrasonic task stays
   // disabled until its pins and begin() calls are configured in robot_init().
-  taskManager.addTask(tRead_ultrasonic);
-  taskManager.addTask(tRead_infrared);
-  taskManager.addTask(tRead_colour);
   taskManager.addTask(tRead_imu);
   taskManager.addTask(tVL53L1X_sensor);
-  taskManager.addTask(tIR_Distance_sensor);
-  taskManager.addTask(tSensor_average);
   taskManager.addTask(tDC_motor);
-  taskManager.addTask(tWeight_scan);
-  taskManager.addTask(tCollect_weight);
-  taskManager.addTask(tReturn_to_base);
-  taskManager.addTask(tDetect_base);
-  taskManager.addTask(tUnload_weights);
   taskManager.addTask(tBT_stream_test);
   taskManager.addTask(tOpticalFlow);
   taskManager.addTask(tLD06_lidar);
   taskManager.addTask(tLocalisation);
-  taskManager.addTask(tLidarFrontTest);
   taskManager.addTask(tPOI_Detector);
   taskManager.addTask(tToF_SearchPlanner);
 
-  tRead_ultrasonic.enable();
-  tRead_infrared.enable();
-  tRead_colour.enable();
   tRead_imu.enable();
   tVL53L1X_sensor.enable();
-  tIR_Distance_sensor.enable();
-  tSensor_average.enable();
   tDC_motor.enable();
-  tWeight_scan.enable();
-  tCollect_weight.enable();
-  tReturn_to_base.enable();
-  tDetect_base.enable();
-  tUnload_weights.enable();
   tBT_stream_test.enable();
   tOpticalFlow.enable();
   tLD06_lidar.enable();
-  tLidarFrontTest.enable();
   tLocalisation.enable();
   tPOI_Detector.enable();
   tToF_SearchPlanner.enable();

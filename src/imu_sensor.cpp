@@ -17,15 +17,10 @@
 // External BNO055 structure (must be defined in main .ino file)
 extern struct bno055_t bno055;
 
-// Gyroscope accumulated angle (integrated from angular velocity)
-struct {
-  float x_angle;  // Accumulated rotation angle in degrees
-  float y_angle;
-  float z_angle;
-} gyro_angle = {0, 0, 0};
-
-// Last timestamp for gyro integration
-unsigned long last_gyro_time_ms = 0;
+// Raw-count gyro bias estimated while the robot is stationary at startup.
+static float gyro_bias_x = 0.0f;
+static float gyro_bias_y = 0.0f;
+static float gyro_bias_z = 0.0f;
 // Accelerometer EMA filter state
 static float accel_x_f = 0.0f;
 static float accel_y_f = 0.0f;
@@ -106,31 +101,12 @@ IMU_Data read_imu(void) {
   memset(&gyro_data, 0, sizeof(struct bno055_gyro));
   comres = bno055_read_gyro_xyz(&gyro_data);
   if (comres == SUCCESS) {
-    // Get current time for delta calculation
-    unsigned long current_time_ms = millis();
-    
-    // Calculate delta time in seconds (only integrate if initialized)
-    if (last_gyro_time_ms > 0) {
-      float delta_time_s = (float)(current_time_ms - last_gyro_time_ms) / 1000.0f;
-      
-      // Convert angular velocity to degrees/s and integrate
-      float gyro_x_deg_s = ((float)gyro_data.x / 900.0f) * RAD_TO_DEG;
-      float gyro_y_deg_s = ((float)gyro_data.y / 900.0f) * RAD_TO_DEG;
-      float gyro_z_deg_s = ((float)gyro_data.z / 900.0f) * RAD_TO_DEG;
-      
-      // Accumulate angle: angle += velocity * time
-      gyro_angle.x_angle += gyro_x_deg_s * delta_time_s;
-      gyro_angle.y_angle += gyro_y_deg_s * delta_time_s;
-      gyro_angle.z_angle += gyro_z_deg_s * delta_time_s;
-    }
-    
-    // Update timestamp for next iteration
-    last_gyro_time_ms = current_time_ms;
-    
-    // Return accumulated angles
-    imu_data.gyro_x = gyro_angle.x_angle;
-    imu_data.gyro_y = gyro_angle.y_angle;
-    imu_data.gyro_z = gyro_angle.z_angle;
+    // The BNO055 default gyro unit is degrees/second (16 LSB per dps).
+    // Convert the instantaneous angular rate to rad/s for IMU_Data.
+    const float dps_to_rad_s = PI / (180.0f * 16.0f);
+    imu_data.gyro_x = ((float)gyro_data.x - gyro_bias_x) * dps_to_rad_s;
+    imu_data.gyro_y = ((float)gyro_data.y - gyro_bias_y) * dps_to_rad_s;
+    imu_data.gyro_z = ((float)gyro_data.z - gyro_bias_z) * dps_to_rad_s;
   } else {
     Serial.print("Gyro read failed: ");
     Serial.println(comres);
@@ -176,23 +152,40 @@ IMU_Data read_imu(void) {
 }
 
 /*****************************************************************************
- * Description: Reset gyroscope angle tracking to zero
+ * Description: Calibrate the stationary gyroscope bias
  *
- * This function resets the accumulated gyroscope angles to zero, setting
- * the current orientation as the reference point (0, 0, 0). All future
- * rotations will be measured relative to this point.
+ * Keep the robot still while the sensor is sampled. The raw-count averages
+ * are subtracted from subsequent instantaneous angular-rate readings.
  *
  ****************************************************************************/
 void calibrate_gyroscope(void) {
-  // Reset accumulated angles to zero - current orientation is now reference point
-  gyro_angle.x_angle = 0;
-  gyro_angle.y_angle = 0;
-  gyro_angle.z_angle = 0;
-  
-  // Initialize timestamp for next reading
-  last_gyro_time_ms = millis();
-  
-  Serial.println("Gyroscope reference point set to zero");
+  const uint16_t sample_count = 100;
+  int32_t sum_x = 0;
+  int32_t sum_y = 0;
+  int32_t sum_z = 0;
+  uint16_t valid_samples = 0;
+
+  Serial.println("Calibrating gyro bias; keep robot still...");
+  for (uint16_t i = 0; i < sample_count; ++i) {
+    struct bno055_gyro sample;
+    memset(&sample, 0, sizeof(sample));
+    if (bno055_read_gyro_xyz(&sample) == SUCCESS) {
+      sum_x += sample.x;
+      sum_y += sample.y;
+      sum_z += sample.z;
+      ++valid_samples;
+    }
+    delay(10);
+  }
+
+  if (valid_samples > 0) {
+    gyro_bias_x = (float)sum_x / valid_samples;
+    gyro_bias_y = (float)sum_y / valid_samples;
+    gyro_bias_z = (float)sum_z / valid_samples;
+    Serial.println("Gyro bias calibration complete");
+  } else {
+    Serial.println("Gyro bias calibration failed; using zero bias");
+  }
 }
 
 
