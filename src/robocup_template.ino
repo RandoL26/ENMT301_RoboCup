@@ -1423,18 +1423,28 @@ void send_robot_status_telemetry()
 
 //     taskManager.execute();
 
-//     static unsigned long last_status_ms = 0;
-//     static unsigned long last_hb_ms = 0;
-//     static unsigned long last_pose_ms = 0;
-//     static unsigned long last_grid_ms = 0;
-//     static unsigned long last_inflated_grid_ms = 0;
+    static unsigned long last_status_ms = 0;
+    static unsigned long last_hb_ms = 0;
+    static unsigned long last_pose_ms = 0;
+    static unsigned long last_grid_ms = 0;
+    static unsigned long last_inflated_grid_ms = 0;
+    static unsigned long last_replan_ms = 0;
+    unsigned long now = millis();
 
-//     unsigned long now = millis();
+    if (now - last_replan_ms >= 500) {
+        const float robot_radius_m =
+            sqrtf(0.25f * MappingNav::ROBOT_LENGTH_M * MappingNav::ROBOT_LENGTH_M +
+                0.25f * MappingNav::ROBOT_WIDTH_M * MappingNav::ROBOT_WIDTH_M) +
+            MappingNav::ROBOT_SAFETY_MARGIN_M;
 
-//     if (now - last_status_ms >= 200) {
-//         send_robot_status_telemetry();
-//         last_status_ms = now;
-//     }
+        mappingNav.replanPath(robot_radius_m);
+        last_replan_ms = now;
+    }
+
+    if (now - last_status_ms >= 200) {
+        send_robot_status_telemetry();
+        last_status_ms = now;
+    }
 
 //     if (now - last_hb_ms >= 1000) {
 //         telemetry_send_heartbeat(now, 0, 0);
@@ -1448,24 +1458,14 @@ void send_robot_status_telemetry()
 //         last_pose_ms = now;
 //     }
 
-//     if (now - last_grid_ms >= 1500) {
-//         telemetry_send_grid_keyframe(mappingNav);
-//         last_grid_ms = now;
-//     }
-//     if (now - last_inflated_grid_ms >= 1500) {
-//         telemetry_send_inflated_grid(mappingNav);
-//         last_inflated_grid_ms = now;
-//     }
-// }
-
-void loop()
-{
-    taskManager.execute();
-
-    static unsigned long lastPrint = 0;
-
-    if (millis() - lastPrint >= 1000) {
-        lastPrint = millis();
-        Serial.println("===== MAIN LOOP ALIVE =====");
+    if (now - last_grid_ms >= 1500) {
+        telemetry_send_grid_keyframe(mappingNav);
+        last_grid_ms = now;
     }
+    if (now - last_inflated_grid_ms >= 1500) {
+        telemetry_send_inflated_grid(mappingNav);
+        last_inflated_grid_ms = now;
+    }
+
 }
+

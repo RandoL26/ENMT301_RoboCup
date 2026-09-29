@@ -5,6 +5,7 @@
 
 namespace {
 const float PI_F = 3.14159265358979323846f;
+static constexpr uint16_t LIDAR_MATCH_STRIDE = 12;
 float wrapRad(float angle) {
   while (angle >= PI_F) angle -= 2.0f * PI_F;
   while (angle < -PI_F) angle += 2.0f * PI_F;
@@ -90,26 +91,28 @@ bool RoboSLAM::matchScan(LD06 &ld, float &dx, float &dy, float &dtheta,
   const MappingNav::Pose2D origin = m_nav.getPose();
   MappingNav::Pose2D best = origin;
   uint16_t tested = 0, bestTested = 0;
-  float baseline = scorePose(ld, origin, 8, tested);
+  float baseline = scorePose(ld, origin, LIDAR_MATCH_STRIDE, tested);
   score = baseline;
   if (tested < LIDAR_MATCH_MIN_POINTS) return false;
 
   float bestScore = baseline;
   // Coarse bounded search: +/- 10 cm and +/- 10 degrees at 5 cm/5 degree steps.
-  for (int xi=-2; xi<=2; ++xi) for (int yi=-2; yi<=2; ++yi)
-    for (int ai=-2; ai<=2; ++ai) {
-      MappingNav::Pose2D candidate = origin;
-      candidate.x_m += xi * 0.05f;
-      candidate.y_m += yi * 0.05f;
-      candidate.theta_rad = wrapRad(origin.theta_rad + ai * (5.0f * PI_F / 180.0f));
-      uint16_t n = 0;
-      const float candidateScore = scorePose(ld, candidate, 8, n);
-      if (n >= LIDAR_MATCH_MIN_POINTS && candidateScore > bestScore) {
-        best = candidate;
-        bestScore = candidateScore;
-        bestTested = n;
+  for (int xi=-LIDAR_COARSE_RADIUS; xi<=LIDAR_COARSE_RADIUS; ++xi)
+    for (int yi=-LIDAR_COARSE_RADIUS; yi<=LIDAR_COARSE_RADIUS; ++yi)
+      for (int ai=-LIDAR_COARSE_RADIUS; ai<=LIDAR_COARSE_RADIUS; ++ai) {
+        MappingNav::Pose2D candidate = origin;
+        candidate.x_m += xi * 0.05f;
+        candidate.y_m += yi * 0.05f;
+        candidate.theta_rad =
+            wrapRad(origin.theta_rad + ai * (5.0f * PI_F / 180.0f));
+        uint16_t n = 0;
+        const float candidateScore = scorePose(ld, candidate, 8, n);
+        if (n >= LIDAR_MATCH_MIN_POINTS && candidateScore > bestScore) {
+          best = candidate;
+          bestScore = candidateScore;
+          bestTested = n;
+        }
       }
-    }
 
   // Fine local refinement around the coarse winner (3x3x3 candidates).
   const MappingNav::Pose2D coarseBest = best;
@@ -128,32 +131,20 @@ bool RoboSLAM::matchScan(LD06 &ld, float &dx, float &dy, float &dtheta,
       }
     }
 
-  // Reject repeated/ambiguous geometry when a separated coarse candidate is
-  // nearly as good as the winning pose (scores are occupied returns / tested).
-  float runnerUp = 0.0f;
-  for (int xi=-2; xi<=2; ++xi) for (int yi=-2; yi<=2; ++yi)
-    for (int ai=-2; ai<=2; ++ai) {
-      MappingNav::Pose2D candidate = origin;
-      candidate.x_m += xi * 0.05f;
-      candidate.y_m += yi * 0.05f;
-      candidate.theta_rad = wrapRad(origin.theta_rad + ai * (5.0f * PI_F / 180.0f));
-      const float sepX = candidate.x_m - best.x_m;
-      const float sepY = candidate.y_m - best.y_m;
-      const float sepTheta = wrapRad(candidate.theta_rad - best.theta_rad);
-      if (sqrtf(sepX*sepX + sepY*sepY) < 0.075f &&
-          fabsf(sepTheta) < 7.5f * PI_F / 180.0f) continue;
-      uint16_t n = 0;
-      const float alternative = scorePose(ld, candidate, 8, n);
-      if (n >= LIDAR_MATCH_MIN_POINTS && alternative > runnerUp) runnerUp = alternative;
-    }
+    // Keep scan matching bounded. The previous implementation performed
+    // another 125 full scorePose() evaluations here to find a runner-up.
+    // That was too expensive for the real-time control loop.
+    const float runnerUp = baseline;
 
   dx = best.x_m - origin.x_m;
   dy = best.y_m - origin.y_m;
   dtheta = wrapRad(best.theta_rad - origin.theta_rad);
   score = bestScore;
   const float positionCorrection = sqrtf(dx * dx + dy * dy);
-  const bool meaningfulImprovement = bestScore >= baseline + LIDAR_MATCH_MIN_IMPROVEMENT;
-  const bool unambiguous = bestScore >= runnerUp + LIDAR_MATCH_AMBIGUITY_MARGIN;
+  const bool meaningfulImprovement =
+    bestScore >= baseline + LIDAR_MATCH_MIN_IMPROVEMENT;
+
+  const bool unambiguous = true;
   const bool safeCorrection = positionCorrection <= LIDAR_CORRECTION_MAX_M &&
                               fabsf(dtheta) <= LIDAR_CORRECTION_MAX_RAD;
   return bestTested >= LIDAR_MATCH_MIN_POINTS && bestScore >= LIDAR_MATCH_MIN_SCORE &&
@@ -198,10 +189,9 @@ void RoboSLAM::processScan(LD06 &ld) {
   if (rayCount) m_nav.updateGridFromSensors(rays, rayCount);
   m_nav.setPose(pose.x_m, pose.y_m, pose.theta_rad);
 
-  const float robot_radius_m = sqrtf(0.25f*MappingNav::ROBOT_LENGTH_M*MappingNav::ROBOT_LENGTH_M +
-                                    0.25f*MappingNav::ROBOT_WIDTH_M*MappingNav::ROBOT_WIDTH_M) +
-                               MappingNav::ROBOT_SAFETY_MARGIN_M;
-  m_nav.replanPath(robot_radius_m);
+  // Path planning is intentionally NOT performed here.
+  // LiDAR processing must remain bounded so it cannot block
+  // motor control, localisation, or telemetry.
   const MappingNav::Pose2D finalPose = m_nav.getPose();
   const float left = last_left_delta_m, right = last_right_delta_m;
   telemetry_send_localisation_debug(left, right, last_encoder_dtheta_rad,
