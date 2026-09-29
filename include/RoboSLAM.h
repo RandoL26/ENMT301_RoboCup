@@ -11,8 +11,8 @@ class RoboSLAM {
 public:
   RoboSLAM(MappingNav &nav, MotorControl &motors);
   void begin();
-  // Call from the 10 ms prediction task. Encoder calibration remains disabled
-  // until encoder counts/metre and effective track width have been measured.
+  // Call from the 10 ms prediction task. Encoder distance uses the shared
+  // OdometryConfig scale; IMU gyro supplies heading while track width is unset.
   void updatePrediction(const IMU_Data &imu, uint32_t now_ms);
   // Process a completed scan: match to the existing map, then map at corrected pose.
   void processScan(LD06 &ld);
@@ -30,8 +30,8 @@ private:
   float last_match_score = 0.0f;
   bool last_match_accepted = false;
 
-  // Set these after physical calibration. Zero disables the corresponding
-  // encoder estimate; no guessed scale/track width is used by default.
+  // Scan matching stays deliberately bounded; see OdometryConfig for the
+  // encoder scale and IMU sign used by prediction.
   static constexpr float IMU_HEADING_WEIGHT = 1.0f;
   static constexpr float LIDAR_OFFSET_X_M = 0.10f;
   static constexpr float LIDAR_OFFSET_Y_M = -0.04f;

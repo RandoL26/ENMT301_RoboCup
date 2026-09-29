@@ -169,12 +169,12 @@ RobotStartSide robotStartSide = START_LEFT;
 // Replace these with the actual coordinates from your
 // RoboCup arena/brief once confirmed.
 
-const float START_LEFT_X_M = 0.30f;
-const float START_LEFT_Y_M = 0.30f;
+const float START_LEFT_X_M = 0.55f;
+const float START_LEFT_Y_M = 0.51f;
 const float START_LEFT_THETA_RAD = 0.0f;
 
-const float START_RIGHT_X_M = 2.10f;
-const float START_RIGHT_Y_M = 0.30f;
+const float START_RIGHT_X_M = 1.95f;
+const float START_RIGHT_Y_M = 0.51f;
 const float START_RIGHT_THETA_RAD = 0.0f;
 
 // ============================================================
@@ -192,19 +192,15 @@ bool binary_telemetry_active = OPTICAL_FLOW_SERIAL_TEST;
 bool robotStarted = false;
 // Set true to route USB/Bluetooth MOTOR commands directly to the motor task.
 // Leave false to use the autonomous navigator.
-bool manual_motor_control_enabled = true;
-bool lastStartButtonState = HIGH;
-unsigned long startButtonDebounceTime = 0;
-const unsigned long START_BUTTON_DEBOUNCE_MS = 50;
+bool manual_motor_control_enabled = false;
 static const unsigned long AUTONOMOUS_SCAN_INTERVAL_MS = 10000;
-static const unsigned long AUTONOMOUS_SCAN_TIMEOUT_MS = 20000;
 static const float AUTONOMOUS_SCAN_TARGET_RAD = 6.28319f; // One full rotation
 static const int16_t AUTONOMOUS_SCAN_SPEED = 28;
 static bool autonomous_scan_active = false;
 static unsigned long autonomous_last_scan_ms = 0;
-static unsigned long autonomous_scan_start_ms = 0;
-static float autonomous_scan_last_heading_rad = 0.0f;
 static float autonomous_scan_rotation_rad = 0.0f;
+static unsigned long autonomous_scan_last_sample_ms = 0;
+static unsigned long last_lidar_scan_ms = 0;
 
 bool pickingUp = false;
 // DC Motor PIN definitions
@@ -293,6 +289,8 @@ POIDetector poiDetector;
 ToFCoverageMap tofCoverageMap;
 ToFSearchPlanner searchPlanner;
 bool target_navigation_active = false;
+static bool exploration_goal_needs_update = true;
+bool visualiser_path_preview_active = false;
 
 // ToF sensor calibration (MUST BE CALIBRATED FOR YOUR ROBOT)
 ToFExtrinsics tof_extrinsics = {0.0f, 0.0f, 0.0f};  // x_offset_m, y_offset_m, yaw_offset_rad
@@ -399,6 +397,7 @@ void ld06_lidar_callback(void) {
         scan_ready_count++;
     }
     if (scanReady) {
+        last_lidar_scan_ms = millis();
         // Feed on-board RoboSLAM then also emit Teleplot for external tools if needed
         roboSlam.processScan(ld06);
         
@@ -505,9 +504,14 @@ void vl53l1x_sensor_callback(void) {
 
     const bool target_confirmed = targetDetector.isTargetConfirmed();
     if (!target_confirmed) {
+        if (target_navigation_active) {
+            exploration_goal_needs_update = true;
+        }
         target_navigation_active = false;
         return;
     }
+
+    visualiser_path_preview_active = false;
 
     if (target_navigation_active) return;
 
@@ -538,6 +542,7 @@ void vl53l1x_sensor_callback(void) {
     const float goal_y_m = pose.y_m + forward_m * sin_heading + left_m * cos_heading;
     if (mappingNav.setGoalWorld(goal_x_m, goal_y_m)) {
         target_navigation_active = true;
+        exploration_goal_needs_update = false;
     }
 }
 
@@ -569,14 +574,26 @@ void tof_search_planner_callback(void) {
     if (!robotStarted) return;
 
     if (targetDetector.isTargetConfirmed()) {
+        visualiser_path_preview_active = false;
         target_navigation_active = true;
+        exploration_goal_needs_update = false;
         return;
     }
-    if (target_navigation_active) target_navigation_active = false;
+    if (target_navigation_active) {
+        target_navigation_active = false;
+        exploration_goal_needs_update = true;
+    }
+    if (visualiser_path_preview_active) return;
+
+    // Hold an existing exploration goal until reached or its path is invalid.
+    // This avoids needless full-map completion scans and goal changes every
+    // planner tick while MappingNav continues bounded replanning in loop().
+    if (!exploration_goal_needs_update && mappingNav.getPathLength() > 1) return;
 
     // Check if search is complete
     if (searchPlanner.isSearchComplete(tofCoverageMap, mappingNav)) {
         // Search complete; no new targets needed
+        exploration_goal_needs_update = false;
         return;
     }
     
@@ -633,8 +650,9 @@ void tof_search_planner_callback(void) {
         if (best_cell < MappingNav::NUM_CELLS) {
             const uint16_t cell_x = best_cell % MappingNav::GRID_WIDTH;
             const uint16_t cell_y = best_cell / MappingNav::GRID_WIDTH;
-            mappingNav.setGoalWorld((cell_x + 0.5f) * MappingNav::CELL_SIZE_M,
-                                    (cell_y + 0.5f) * MappingNav::CELL_SIZE_M);
+            exploration_goal_needs_update = mappingNav.setGoalWorld(
+                (cell_x + 0.5f) * MappingNav::CELL_SIZE_M,
+                (cell_y + 0.5f) * MappingNav::CELL_SIZE_M);
         }
         return;
     }
@@ -647,6 +665,7 @@ void tof_search_planner_callback(void) {
         // Goal is unreachable or outside arena
         return;
     }
+    exploration_goal_needs_update = false;
     
     // For now, just print diagnostics
     #if TELEMETRY_ALLOW_ASCII_TELEPLOT
@@ -707,6 +726,55 @@ void imu_task_callback(void) {
 }
 
 // Task wrapper for DC motor control
+static bool lidar_blocks_motion(int16_t left_speed, int16_t right_speed) {
+    if (left_speed == 0 && right_speed == 0) return false;
+
+    const unsigned long now = millis();
+    if (last_lidar_scan_ms == 0 || now - last_lidar_scan_ms > 500) return true;
+
+    const uint16_t point_count = ld06.getNbPointsInScan();
+    if (point_count < 24) return true;
+
+    const bool rotating = (left_speed < 0 && right_speed > 0) ||
+                          (left_speed > 0 && right_speed < 0);
+    const float robot_half_length = 0.5f * MappingNav::ROBOT_LENGTH_M;
+    const float robot_half_width = 0.5f * MappingNav::ROBOT_WIDTH_M;
+    const float safety_margin = MappingNav::ROBOT_SAFETY_MARGIN_M;
+
+    for (uint16_t i = 0; i < point_count; ++i) {
+        const DataPoint *point = ld06.getPoints(i);
+        if (!point || point->distance < 50 || point->distance > 4000) continue;
+
+        const float angle_rad = point->angle * PI / 180.0f;
+        const float range_m = point->distance * 0.001f;
+        // Same LiDAR offset and angle convention used by RoboSLAM::processScan.
+        const float obstacle_x = 0.10f + range_m * cosf(angle_rad);
+        const float obstacle_y = -0.04f + range_m * sinf(angle_rad);
+
+        if (rotating) {
+            // The robot's rotating footprint is bounded by its circumscribed radius.
+            const float sweep_radius = sqrtf(obstacle_x * obstacle_x +
+                                             obstacle_y * obstacle_y);
+            const float robot_radius = sqrtf(robot_half_length * robot_half_length +
+                                             robot_half_width * robot_half_width) +
+                                       safety_margin;
+            if (sweep_radius < robot_radius) return true;
+        } else if (left_speed + right_speed >= 0) {
+            // Forward corridor includes the robot footprint and braking clearance.
+            if (obstacle_x >= -robot_half_length - safety_margin &&
+                obstacle_x <= robot_half_length + 0.20f &&
+                fabsf(obstacle_y) <= robot_half_width + 0.08f) return true;
+        } else {
+            // Apply the same clearance behind the robot for reverse commands.
+            if (obstacle_x <= robot_half_length + safety_margin &&
+                obstacle_x >= -robot_half_length - 0.20f &&
+                fabsf(obstacle_y) <= robot_half_width + 0.08f) return true;
+        }
+    }
+
+    return false;
+}
+
 void dc_motor_callback(void) {
     if (!robotStarted) {
         cmd_left_motor = 0;
@@ -729,29 +797,45 @@ void dc_motor_callback(void) {
         const MappingNav::Pose2D pose = mappingNav.getPose();
 
         if (targetDetector.isTargetConfirmed()) {
-            autonomous_last_scan_ms = now;
-            autonomous_scan_active = false;
+            visualiser_path_preview_active = false;
             target_navigation_active = true;
         }
 
-        if (autonomous_scan_active ||
-            (!target_navigation_active &&
-             now - autonomous_last_scan_ms >= AUTONOMOUS_SCAN_INTERVAL_MS)) {
+        if (visualiser_path_preview_active && !target_navigation_active &&
+            !autonomous_scan_active &&
+            now - autonomous_last_scan_ms < AUTONOMOUS_SCAN_INTERVAL_MS) {
+            autonomous_scan_active = false;
+        } else if (autonomous_scan_active ||
+                   now - autonomous_last_scan_ms >= AUTONOMOUS_SCAN_INTERVAL_MS) {
             if (!autonomous_scan_active) {
                 autonomous_scan_active = true;
-                autonomous_scan_start_ms = now;
-                autonomous_scan_last_heading_rad = pose.theta_rad;
                 autonomous_scan_rotation_rad = 0.0f;
+                autonomous_scan_last_sample_ms = now;
             }
 
-            float heading_delta = pose.theta_rad - autonomous_scan_last_heading_rad;
-            if (heading_delta > PI) heading_delta -= 2.0f * PI;
-            if (heading_delta < -PI) heading_delta += 2.0f * PI;
-            autonomous_scan_rotation_rad += fabsf(heading_delta);
-            autonomous_scan_last_heading_rad = pose.theta_rad;
+            const unsigned long sample_elapsed_ms = now - autonomous_scan_last_sample_ms;
+            if (current_imu_data.gyro_valid && sample_elapsed_ms <= 250) {
+                autonomous_scan_rotation_rad += fabsf(
+                    OdometryConfig::IMU_YAW_SIGN * current_imu_data.gyro_z *
+                    ((float)sample_elapsed_ms / 1000.0f));
+            }
+            autonomous_scan_last_sample_ms = now;
 
-            if (autonomous_scan_rotation_rad >= AUTONOMOUS_SCAN_TARGET_RAD ||
-                now - autonomous_scan_start_ms >= AUTONOMOUS_SCAN_TIMEOUT_MS) {
+            if (autonomous_scan_rotation_rad >= AUTONOMOUS_SCAN_TARGET_RAD) {
+                // Correct accumulated gyro drift from the BNO055 heading, relative
+                // to the designated start orientation, before navigation resumes.
+                if (telemetry_imu_ok) {
+                    float heading_delta_deg = current_imu_data.euler_h - imu_heading_offset;
+                    while (heading_delta_deg > 180.0f) heading_delta_deg -= 360.0f;
+                    while (heading_delta_deg < -180.0f) heading_delta_deg += 360.0f;
+                    const float start_heading = robotStartSide == START_LEFT
+                        ? START_LEFT_THETA_RAD : START_RIGHT_THETA_RAD;
+                    const MappingNav::Pose2D corrected_pose = mappingNav.getPose();
+                    const float corrected_theta = start_heading -
+                        heading_delta_deg * (PI / 180.0f);
+                    mappingNav.setPose(corrected_pose.x_m, corrected_pose.y_m,
+                                       corrected_theta);
+                }
                 autonomous_scan_active = false;
                 autonomous_last_scan_ms = now;
             } else {
@@ -764,9 +848,17 @@ void dc_motor_callback(void) {
             MappingNav::CellCoord path[8];
             const uint16_t path_count = mappingNav.getPathCells(path, 8);
             if (path_count > 1) {
-                const MappingNav::CellCoord &lookahead = path[path_count - 1];
+                // Follow the planner's route a few cells ahead so turns and
+                // obstacle-driven replans affect steering instead of aiming
+                // directly at the distant goal.
+                const uint16_t lookahead_index = path_count > 4 ? 4 : path_count - 1;
+                const MappingNav::CellCoord &lookahead = path[lookahead_index];
                 const float goal_x_m = (lookahead.x + 0.5f) * MappingNav::CELL_SIZE_M;
                 const float goal_y_m = (lookahead.y + 0.5f) * MappingNav::CELL_SIZE_M;
+                const float goal_dx_m = goal_x_m - pose.x_m;
+                const float goal_dy_m = goal_y_m - pose.y_m;
+                const float goal_distance_m = sqrtf(goal_dx_m * goal_dx_m +
+                                                   goal_dy_m * goal_dy_m);
                 const float desired_heading = atan2f(goal_y_m - pose.y_m,
                                                      goal_x_m - pose.x_m);
                 float heading_error = desired_heading - pose.theta_rad;
@@ -783,14 +875,38 @@ void dc_motor_callback(void) {
                         right_target = -turn_speed;
                     }
                 } else {
-                    const int16_t forward_speed = 32;
+                    const int16_t forward_speed = (int16_t)constrain(
+                        (int)(goal_distance_m * 100.0f), 10, 32);
                     const int16_t correction = (int16_t)constrain(
-                        (int)(heading_error * 18.0f), -12, 12);
+                        (int)(heading_error * 22.0f), -18, 18);
                     left_target = forward_speed - correction;
                     right_target = forward_speed + correction;
                 }
             }
         }
+    }
+
+    if (lidar_blocks_motion(left_target, right_target)) {
+        cmd_left_motor = 0;
+        cmd_right_motor = 0;
+        applied_left_motor = 0;
+        applied_right_motor = 0;
+        driveMotor.stop();
+        return;
+    }
+
+    // A visualiser goal is only for path preview. Hold the drivetrain stopped
+    // until the preview is cleared or a confirmed target takes priority.
+    if (!manual_motor_control_enabled && visualiser_path_preview_active &&
+        !autonomous_scan_active &&
+        !targetDetector.isTargetConfirmed()) {
+        autonomous_scan_active = false;
+        cmd_left_motor = 0;
+        cmd_right_motor = 0;
+        applied_left_motor = 0;
+        applied_right_motor = 0;
+        driveMotor.stop();
+        return;
     }
 
     cmd_left_motor = left_target;
@@ -924,6 +1040,31 @@ void handle_motor_line(const char* line, Print* ackPort) {
     upperLine[sizeof(upperLine) - 1] = '\0';
     for (int i = 0; upperLine[i] != '\0'; i++) {
         upperLine[i] = toupper((unsigned char)upperLine[i]);
+    }
+
+    if (strcmp(upperLine, "PREVIEW CLEAR") == 0) {
+        visualiser_path_preview_active = false;
+        const MappingNav::Pose2D pose = mappingNav.getPose();
+        mappingNav.setGoalWorld(pose.x_m, pose.y_m);
+        if (ackPort != nullptr) ackPort->println("ACK PREVIEW CLEAR");
+        return;
+    }
+
+    float preview_x_m = 0.0f;
+    float preview_y_m = 0.0f;
+    if (sscanf(upperLine, "PREVIEW %f %f", &preview_x_m, &preview_y_m) == 2) {
+        if (targetDetector.isTargetConfirmed()) {
+            if (ackPort != nullptr) ackPort->println("REJECT PREVIEW TARGET ACTIVE");
+            return;
+        }
+        if (mappingNav.setGoalWorld(preview_x_m, preview_y_m)) {
+            target_navigation_active = false;
+            visualiser_path_preview_active = true;
+            if (ackPort != nullptr) ackPort->println("ACK PREVIEW");
+        } else if (ackPort != nullptr) {
+            ackPort->println("REJECT PREVIEW OUT OF BOUNDS");
+        }
+        return;
     }
 
     if (strcmp(upperLine, "MAP RESET") == 0) {
@@ -1180,46 +1321,6 @@ void setRobotStartPosition()
     }
 }
 
-void checkStartButton() {
-    bool buttonState = digitalRead(START_BUTTON_PIN);
-
-    // Button pressed: HIGH -> LOW
-    if (lastStartButtonState == HIGH && buttonState == LOW) {
-        unsigned long now = millis();
-
-        if (now - startButtonDebounceTime >= START_BUTTON_DEBOUNCE_MS) {
-            startButtonDebounceTime = now;
-
-            if (!robotStarted) {
-                // Reset mapping
-                mappingNav.reset();
-                setRobotStartPosition();
-                tofCoverageMap.reset();
-                target_navigation_active = false;
-                autonomous_scan_active = false;
-                autonomous_last_scan_ms = now;
-
-                // Reset RoboSLAM odometry/state
-                roboSlam.begin();
-
-                // Start robot
-                robotStarted = true;
-
-                // Make absolutely sure motors start stopped
-                cmd_left_motor = 0;
-                cmd_right_motor = 0;
-                applied_left_motor = 0;
-                applied_right_motor = 0;
-
-                printlnBoth("START BUTTON PRESSED - MAP/POSE RESET - ROBOT STARTED");
-            }
-        }
-    }
-
-    lastStartButtonState = buttonState;
-}
-
-
 //**********************************************************************************
 // put your setup code here, to run once:
 //**********************************************************************************
@@ -1239,6 +1340,22 @@ void setup() {
   robot_init();        // robot_init() calls BNO_Init() which needs I2C
   task_init();
   bigServo_setup();
+  if (telemetry_imu_ok) {
+    // Start autonomous mode after sensor, motor, pose, and task initialization.
+    // If the required IMU did not initialize, keep the drivetrain stopped.
+    const unsigned long now = millis();
+    cmd_left_motor = 0;
+    cmd_right_motor = 0;
+    applied_left_motor = 0;
+    applied_right_motor = 0;
+    target_navigation_active = false;
+    exploration_goal_needs_update = true;
+    visualiser_path_preview_active = false;
+    autonomous_scan_active = false;
+    autonomous_last_scan_ms = now;
+    robotStarted = true;
+    printlnBoth("POWER-ON AUTONOMY STARTED");
+  }
   // Now that Bluetooth is initialized, send startup message
   if (bluetooth.isInitialized()) {
     bluetooth.println("Setup Complete");
@@ -1592,15 +1709,14 @@ void send_robot_status_telemetry()
 
         robotStarted,
         digitalRead(START_BUTTON_PIN) == LOW,
-        target_navigation_active
+        target_navigation_active,
+        visualiser_path_preview_active
     );
 }
 //**********************************************************************************
 // put your main code here, to run repeatedly
 //**********************************************************************************
 void loop() {
-    
-    checkStartButton();
     process_bluetooth_motor_commands();
     process_usb_motor_commands();
 

@@ -530,7 +530,8 @@ void telemetry_send_status(
     uint16_t path_length,
     bool robot_started,
     bool start_button_pressed,
-    bool target_navigation_active)
+    bool target_navigation_active,
+    bool visualiser_path_preview_active)
 {
     /*
      * STATUS packet 0x07
@@ -549,11 +550,12 @@ void telemetry_send_status(
      * 19      robot started
      * 20      D25 start button pressed
      * 21      target navigation active
+     * 22      visualiser path preview active
      *
-     * Total = 22 bytes
+     * Total = 23 bytes
      */
 
-    const uint16_t payload_len = 22;
+    const uint16_t payload_len = 23;
 
     uint8_t payload[payload_len];
 
@@ -632,6 +634,7 @@ void telemetry_send_status(
     payload[19] = robot_started ? 1 : 0;
     payload[20] = start_button_pressed ? 1 : 0;
     payload[21] = target_navigation_active ? 1 : 0;
+    payload[22] = visualiser_path_preview_active ? 1 : 0;
 
     send_frame(
         1,

@@ -44,6 +44,7 @@ VERSION = 1
 HEADER_FMT = "<BBHH"
 HEADER_SIZE = 6
 CRC_SIZE = 2
+MAX_PAYLOAD_SIZE = 8192
 
 PACKET_POSE_PATH = 0x01
 PACKET_GRID_KEYFRAME = 0x02
@@ -147,6 +148,7 @@ class TelemetryState:
     robot_started: Optional[bool] = None
     start_button_pressed: Optional[bool] = None
     target_navigation_active: bool = False
+    visualiser_path_preview_active: bool = False
     lidar_diag: Optional[dict] = None
 
         # Localisation diagnostics
@@ -219,6 +221,12 @@ class FrameParser:
                 self.buf[6:8],
                 "little",
             )
+
+            # Reject corrupt headers promptly so a stray byte cannot make the
+            # parser wait indefinitely and hide subsequent valid grid/scan frames.
+            if payload_len > MAX_PAYLOAD_SIZE:
+                del self.buf[0]
+                continue
 
             total_len = (
                 2
@@ -757,7 +765,7 @@ class TelemetryReconstructor:
         return True
 
     def status(self, payload):
-        if len(payload) not in (19, 22):
+        if len(payload) not in (19, 22, 23):
             return False
         (self.state.start_side, self.state.sensor_flags,
          self.state.motor_left, self.state.motor_right,
@@ -765,10 +773,12 @@ class TelemetryReconstructor:
          goal_set, self.state.goal_cell,
          self.state.status_path_length) = struct.unpack("<BBhhffBHH", payload)
         self.state.planner_goal_set = bool(goal_set)
-        if len(payload) == 22:
+        if len(payload) >= 22:
             self.state.robot_started = bool(payload[19])
             self.state.start_button_pressed = bool(payload[20])
             self.state.target_navigation_active = bool(payload[21])
+        if len(payload) == 23:
+            self.state.visualiser_path_preview_active = bool(payload[22])
         return True
 
 
@@ -1036,6 +1046,7 @@ class SerialWorker(threading.Thread):
             robot_started=state.robot_started,
             start_button_pressed=state.start_button_pressed,
             target_navigation_active=state.target_navigation_active,
+            visualiser_path_preview_active=state.visualiser_path_preview_active,
             lidar_diag=(None if state.lidar_diag is None else dict(state.lidar_diag)),
 
                         encoder_left_delta_m=(
@@ -1145,6 +1156,7 @@ class RoboCupVisualizer(QMainWindow):
         )
 
         self.goal = None
+        self.preview_goal = None
 
         self.trail = []
 
@@ -1177,6 +1189,7 @@ class RoboCupVisualizer(QMainWindow):
         # ----------------------------------------------------
 
         self.plot = pg.PlotWidget()
+        self.plot.scene().sigMouseClicked.connect(self.on_map_clicked)
 
         self.plot.setBackground(
             "#080d18"
@@ -1502,6 +1515,14 @@ class RoboCupVisualizer(QMainWindow):
             self.follow_button
         )
 
+        self.preview_instructions = QLabel("Click the map to preview a path goal.")
+        self.preview_instructions.setWordWrap(True)
+        view_layout.addWidget(self.preview_instructions)
+
+        clear_preview_button = QPushButton("Clear Preview Goal")
+        clear_preview_button.clicked.connect(self.clear_preview_goal)
+        view_layout.addWidget(clear_preview_button)
+
         reset_button = QPushButton(
             "Reset View"
         )
@@ -1781,6 +1802,40 @@ class RoboCupVisualizer(QMainWindow):
         )
         self.target_item.setVisible(self.show_goal)
 
+    def on_map_clicked(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+
+        view_box = self.plot.getViewBox()
+        scene_position = event.scenePos()
+        if not view_box.sceneBoundingRect().contains(scene_position):
+            return
+
+        position = view_box.mapSceneToView(scene_position)
+        x_m = float(position.x())
+        y_m = float(position.y())
+        state = self.state
+        if state is None or x_m < 0.0 or y_m < 0.0:
+            return
+        if (x_m >= state.grid_w * state.cell_mm / 1000.0 or
+                y_m >= state.grid_h * state.cell_mm / 1000.0):
+            return
+
+        self.preview_goal = (x_m, y_m)
+        self.goal = self.preview_goal
+        self.goal_item.setData([x_m], [y_m])
+        self.serial_worker.send_command(f"PREVIEW {x_m:.3f} {y_m:.3f}")
+        self.preview_instructions.setText(
+            f"Preview requested at ({x_m:.2f}, {y_m:.2f}) m. Robot holds position."
+        )
+
+    def clear_preview_goal(self):
+        self.preview_goal = None
+        self.goal = None
+        self.goal_item.clear()
+        self.serial_worker.send_command("PREVIEW CLEAR")
+        self.preview_instructions.setText("Click the map to preview a path goal.")
+
     def toggle_heading(self):
 
         self.show_heading = (
@@ -1874,6 +1929,8 @@ class RoboCupVisualizer(QMainWindow):
 
         # Clear goal
         self.goal = None
+        self.preview_goal = None
+        self.preview_instructions.setText("Click the map to preview a path goal.")
 
         # Clear map
         self.grid_image.clear()
@@ -2416,9 +2473,14 @@ class RoboCupVisualizer(QMainWindow):
                 "RUNNING" if state.robot_started else "STOPPED"
             ) if state.robot_started is not None else "--"
             target_cell = str(state.goal_cell) if state.target_navigation_active else "--"
+            planner_state = (
+                "PREVIEW" if state.visualiser_path_preview_active else
+                "TARGET" if state.target_navigation_active else
+                "FOLLOWING" if state.planner_goal_set else "IDLE"
+            )
             self.planner_label.setText(
                 f"START BTN: {start_button} | ROBOT: {robot_state}\n"
-                f"STATE: {'TARGET' if state.target_navigation_active else ('FOLLOWING' if state.planner_goal_set else 'IDLE')}\n"
+                f"STATE: {planner_state}\n"
                 f"GOAL CELL: {goal}\n"
                 f"TARGET CELL: {target_cell}\n"
                 f"PATH: {state.status_path_length} cells\n"

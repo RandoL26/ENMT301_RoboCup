@@ -33,7 +33,8 @@ void telemetry_send_status(
     uint16_t path_length,
     bool robot_started,
     bool start_button_pressed,
-    bool target_navigation_active
+    bool target_navigation_active,
+    bool visualiser_path_preview_active
 );
 
 void telemetry_send_localisation_debug(

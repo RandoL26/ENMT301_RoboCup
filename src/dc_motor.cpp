@@ -7,6 +7,10 @@
 #include "dc_motor.h"
 #include "Arduino.h"
 
+#ifndef DC_MOTOR_SERIAL_DEBUG
+#define DC_MOTOR_SERIAL_DEBUG 0
+#endif
+
 #if defined(__IMXRT1062__)
 // Teensy 4 QuadEncoder uses read()/setInitConfig()/init()
 #include <QuadEncoder.h>
@@ -56,9 +60,11 @@ void DCMotor::begin(void) {
 void DCMotor::setSpeed(int16_t speed) {
     // Validate speed range
     if (!isValidSpeed(speed)) {
+#if DC_MOTOR_SERIAL_DEBUG
         Serial.print("ERROR: Invalid speed value: ");
         Serial.print(speed);
         Serial.println(" (valid range: -100 to 100)");
+#endif
         return;
     }
 
@@ -78,11 +84,13 @@ void DCMotor::setSpeed(int16_t speed) {
     
     servo.writeMicroseconds(pulse_width);
     
+#if DC_MOTOR_SERIAL_DEBUG
     Serial.print("DC Motor speed set to: ");
     Serial.print(speed);
     Serial.print(" (Pulse: ");
     Serial.print(pulse_width);
     Serial.println(" µs)");
+#endif
 }
 
 /**
@@ -99,7 +107,9 @@ int16_t DCMotor::getSpeed(void) const {
 void DCMotor::stop(void) {
     current_speed = 0;
     servo.writeMicroseconds(NEUTRAL_PULSE);
+#if DC_MOTOR_SERIAL_DEBUG
     Serial.println("DC Motor stopped (neutral position)");
+#endif
 }
 
 /**
