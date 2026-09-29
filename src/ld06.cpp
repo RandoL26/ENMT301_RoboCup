@@ -1,6 +1,8 @@
 #include "ld06.h"
 #include "telemetry.h"
 
+#define LD06_COMPUTE_XY 0
+
 // Diagnostic globals (defined here)
 uint16_t ld06_diag_num_points = 0;
 uint16_t ld06_diag_first_angle_cdeg = 0;
@@ -251,10 +253,13 @@ void LD06::computeData() {
   const float WRAP_DEG_THRESHOLD = 300.0f; // drop amount indicating genuine wrap (deg)
 
   float angleStep = getAngleStep();
+
+  #if LD06_DEBUG_ASCII
   Serial.printf("LD06 STEP=%.4f start=%.2f end=%.2f\n",
               angleStep,
               _receivedData.packet.startAngle / 100.0f,
               _receivedData.packet.endAngle / 100.0f);
+  #endif
   if (angleStep > LD06_ANGLE_STEP_MAX || angleStep <= 0.0f) {
     // Invalid packets should be rejected by parser before computeData().
     // Keep this guard as a fail-safe without resetting initialization state.
@@ -337,23 +342,28 @@ void LD06::computeData() {
 
     _angles[i] = angle;
 
+    #if LD06_DEBUG_ASCII
     if (isInit) {
       Serial.printf("LD06 PARSED isInit=%u distance=%u angle=%.2f\n",
                     (unsigned)isInit,
                     (unsigned)_receivedData.packet.measures[i].distance,
                     angle);
     }
+    #endif
 
     if (isInit && _currentScan->index < LD06_MAX_PTS_SCAN) {
       data.angle     = angle;                                   // Mathematical angle CCW
       data.distance  = _receivedData.packet.measures[i].distance;
       data.intensity = _receivedData.packet.measures[i].intensity;
 
-      const bool filterOk = (!_useFiltering || filter(data));
+    const bool filterOk = (!_useFiltering || filter(data));
+
+      #if LD06_DEBUG_ASCII
       Serial.printf("LD06 FILTER isInit=%u filter=%u write=%u\n",
                     (unsigned)isInit,
                     (unsigned)filterOk,
                     (unsigned)filterOk);
+      #endif
       if (filterOk) {
 #ifdef LD06_COMPUTE_XY
         float angRad = (data.angle + _angularPosition + _angularOffset) * PI / 180.0f;
@@ -369,8 +379,10 @@ void LD06::computeData() {
                  - data.distance * sin(angRad);
 #endif
         _currentScan->points[_currentScan->index++] = data;
+        #if LD06_DEBUG_ASCII
         if (_currentScan->index == 1 || _currentScan->index % 100 == 0)
             Serial.printf("LD06 WRITE buf=%d index=%u\n", _currentBuffer, _currentScan->index);
+        #endif
       }
     }
   }
