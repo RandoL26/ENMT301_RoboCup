@@ -1386,31 +1386,28 @@ void send_robot_status_telemetry()
         mappingNav.getPathLength()
     );
 }
-//**********************************************************************************
 // put your main code here, to run repeatedly
 //**********************************************************************************
-// void loop() {
-    
-//     checkStartButton();
-//     process_bluetooth_motor_commands();
-//     process_usb_motor_commands();
+void loop() {
+    checkStartButton();
+    process_bluetooth_motor_commands();
+    process_usb_motor_commands();
 
-//     taskManager.execute();
+    taskManager.execute();
 
     static unsigned long last_status_ms = 0;
-    static unsigned long last_hb_ms = 0;
-    static unsigned long last_pose_ms = 0;
     static unsigned long last_grid_ms = 0;
     static unsigned long last_inflated_grid_ms = 0;
     static unsigned long last_replan_ms = 0;
-    unsigned long now = millis();
+    const unsigned long now = millis();
 
+    // Planning is deliberately decoupled from the LiDAR callback. It may still
+    // consume CPU, but never blocks LiDAR packet reception/SLAM processing.
     if (now - last_replan_ms >= 500) {
         const float robot_radius_m =
             sqrtf(0.25f * MappingNav::ROBOT_LENGTH_M * MappingNav::ROBOT_LENGTH_M +
-                0.25f * MappingNav::ROBOT_WIDTH_M * MappingNav::ROBOT_WIDTH_M) +
+                  0.25f * MappingNav::ROBOT_WIDTH_M * MappingNav::ROBOT_WIDTH_M) +
             MappingNav::ROBOT_SAFETY_MARGIN_M;
-
         mappingNav.replanPath(robot_radius_m);
         last_replan_ms = now;
     }
@@ -1420,18 +1417,6 @@ void send_robot_status_telemetry()
         last_status_ms = now;
     }
 
-//     if (now - last_hb_ms >= 1000) {
-//         telemetry_send_heartbeat(now, 0, 0);
-//         telemetry_send_diag_scan();
-
-//         last_hb_ms = now;
-//     }
-
-//     if (now - last_pose_ms >= 200) {
-//         telemetry_send_pose_and_path(mappingNav);
-//         last_pose_ms = now;
-//     }
-
     if (now - last_grid_ms >= 1500) {
         telemetry_send_grid_keyframe(mappingNav);
         last_grid_ms = now;
@@ -1440,6 +1425,6 @@ void send_robot_status_telemetry()
         telemetry_send_inflated_grid(mappingNav);
         last_inflated_grid_ms = now;
     }
-
 }
+
 
