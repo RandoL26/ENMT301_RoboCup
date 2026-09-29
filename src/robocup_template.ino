@@ -480,6 +480,7 @@ void vl53l1x_sensor_callback(void) {
         }
     }
     #endif
+    #endif
 
     Serial.println();
 
