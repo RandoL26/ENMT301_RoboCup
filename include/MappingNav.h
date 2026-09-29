@@ -17,6 +17,14 @@ public:
   static constexpr float ARENA_WIDTH_M = 2.4f;
   static constexpr float ARENA_HEIGHT_M = 4.9f;
 
+  // Robot footprint
+  // Change these values if the robot dimensions change.
+  static constexpr float ROBOT_LENGTH_M = 0.370f;
+  static constexpr float ROBOT_WIDTH_M  = 0.210f;
+
+  // Additional clearance around the robot.
+  static constexpr float ROBOT_SAFETY_MARGIN_M = 0.030f;
+
   // Bit-packed cell format (1 byte/cell)
   // bits 0..1: occupancy, bits 2..3: terrain
   enum Occupancy : uint8_t {
@@ -147,6 +155,11 @@ private:
   uint8_t m_grid[NUM_CELLS];            // occupancy + terrain (1 byte/cell)
   uint8_t m_inflated_blocked[NUM_CELLS]; // 1 if occupied in config-space
 
+  // Occupancy confidence score for each cell.
+  // Negative = evidence for free space.
+  // Positive = evidence for an obstacle.
+  int8_t m_occupancy_score[NUM_CELLS];
+
   // Pose
   Pose2D m_pose;
 
@@ -186,6 +199,7 @@ private:
   void setOccupancy(uint16_t idx, Occupancy occ);
   Terrain getTerrain(uint16_t idx) const;
   void setTerrain(uint16_t idx, Terrain terrain);
+  void updateOccupancyEvidence(uint16_t idx, int8_t delta);
 
   // Ray update helpers
   void markRay(float start_x, float start_y,

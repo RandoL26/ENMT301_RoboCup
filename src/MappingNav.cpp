@@ -7,6 +7,18 @@
 #include <math.h>
 #include <string.h>
 
+// ============================================================
+// Robot footprint
+// ============================================================
+
+// Overall robot dimensions.
+// Change these values if the robot dimensions change.
+const float ROBOT_LENGTH_M = 0.370f;
+const float ROBOT_WIDTH_M  = 0.210f;
+
+// Additional safety clearance around the robot.
+const float ROBOT_SAFETY_MARGIN_M = 0.030f;
+
 MappingNav::MappingNav() {
   reset();
 }
@@ -14,7 +26,8 @@ MappingNav::MappingNav() {
 void MappingNav::reset() {
   for (uint16_t i = 0; i < NUM_CELLS; ++i) {
     m_grid[i] = (uint8_t)OCC_UNKNOWN;
-    m_inflated_blocked[i] = 0;
+    m_inflated_blocked[i] = false;
+    m_occupancy_score[i] = 0;
   }
 
   m_pose.x_m = ARENA_WIDTH_M * 0.5f;
@@ -285,8 +298,61 @@ void MappingNav::markRay(float start_x, float start_y,
                          float end_x, float end_y,
                          bool mark_endpoint_occupied) {
   uint16_t sx = 0, sy = 0, ex = 0, ey = 0;
+
+  // The LiDAR origin must be inside the map.
   if (!worldToCell(start_x, start_y, sx, sy)) return;
-  if (!worldToCell(end_x, end_y, ex, ey)) return;
+
+  // Map boundaries in metres.
+  const float map_max_x =
+      (float)GRID_WIDTH * CELL_SIZE_M;
+  const float map_max_y =
+      (float)GRID_HEIGHT * CELL_SIZE_M;
+
+  float clipped_x = end_x;
+  float clipped_y = end_y;
+
+  // Check whether the endpoint is outside the map.
+  if (!inBoundsWorld(end_x, end_y)) {
+    const float dx = end_x - start_x;
+    const float dy = end_y - start_y;
+
+    float t = 1.0f;
+
+    // Find intersection with vertical map boundaries.
+    if (dx > 0.0f && end_x > map_max_x) {
+      const float tx = (map_max_x - start_x) / dx;
+      if (tx >= 0.0f && tx < t) t = tx;
+    } else if (dx < 0.0f && end_x < 0.0f) {
+      const float tx = (0.0f - start_x) / dx;
+      if (tx >= 0.0f && tx < t) t = tx;
+    }
+
+    // Find intersection with horizontal map boundaries.
+    if (dy > 0.0f && end_y > map_max_y) {
+      const float ty = (map_max_y - start_y) / dy;
+      if (ty >= 0.0f && ty < t) t = ty;
+    } else if (dy < 0.0f && end_y < 0.0f) {
+      const float ty = (0.0f - start_y) / dy;
+      if (ty >= 0.0f && ty < t) t = ty;
+    }
+
+    clipped_x = start_x + t * dx;
+    clipped_y = start_y + t * dy;
+
+    // Keep the clipped point safely inside the final cell.
+    const float eps = 0.001f;
+
+    if (clipped_x >= map_max_x)
+      clipped_x = map_max_x - eps;
+    if (clipped_y >= map_max_y)
+      clipped_y = map_max_y - eps;
+    if (clipped_x < 0.0f)
+      clipped_x = 0.0f;
+    if (clipped_y < 0.0f)
+      clipped_y = 0.0f;
+  }
+
+  if (!worldToCell(clipped_x, clipped_y, ex, ey)) return;
 
   int32_t x0 = (int32_t)sx;
   int32_t y0 = (int32_t)sy;
@@ -297,30 +363,44 @@ void MappingNav::markRay(float start_x, float start_y,
   const int32_t sx_step = (x0 < x1) ? 1 : -1;
   const int32_t dy = -abs(y1 - y0);
   const int32_t sy_step = (y0 < y1) ? 1 : -1;
+
   int32_t err = dx + dy;
+
+  const uint16_t origin_idx = indexOf(sx, sy);
 
   while (true) {
     if (!inBoundsCell(x0, y0)) break;
 
-    const uint16_t idx = indexOf((uint16_t)x0, (uint16_t)y0);
-    const bool endpoint = (x0 == x1 && y0 == y1);
+    const uint16_t idx =
+        indexOf((uint16_t)x0, (uint16_t)y0);
 
-    if (endpoint) {
+    const bool endpoint =
+        (x0 == x1 && y0 == y1);
+
+    // Never modify the LiDAR's own cell.
+    if (idx == origin_idx) {
+      // Nothing to do.
+    } else if (endpoint) {
       if (mark_endpoint_occupied) {
-        setOccupancy(idx, OCC_OCCUPIED);
+        // Real LiDAR return: obstacle detected.
+        updateOccupancyEvidence(idx, +3);
       } else {
+        // Ray reached the map boundary with no obstacle.
         maybeMarkFree(idx);
       }
       break;
     } else {
+      // LiDAR passed through this cell without hitting anything.
       maybeMarkFree(idx);
     }
 
     const int32_t e2 = 2 * err;
+
     if (e2 >= dy) {
       err += dy;
       x0 += sx_step;
     }
+
     if (e2 <= dx) {
       err += dx;
       y0 += sy_step;
@@ -329,12 +409,24 @@ void MappingNav::markRay(float start_x, float start_y,
 }
 
 void MappingNav::maybeMarkFree(uint16_t idx) {
-  // Mark cell as FREE when observed as empty space.
-  // Allows OCCUPIED → FREE transitions (e.g., moving obstacles or misdetections).
-  // Only UNKNOWN cells remain UNKNOWN; once observed as either OCCUPIED or FREE,
-  // subsequent observations determine the cell state.
-  Occupancy current = getOccupancy(idx);
-  if (current != OCC_OCCUPIED) {
+  // A LiDAR ray passing through this cell is evidence
+  // that the cell is free.
+  updateOccupancyEvidence(idx, -1);
+}
+
+void MappingNav::updateOccupancyEvidence(uint16_t idx, int8_t delta) {
+  int16_t score = (int16_t)m_occupancy_score[idx] + delta;
+
+  // Saturate the confidence score.
+  if (score > 5) score = 5;
+  if (score < -5) score = -5;
+
+  m_occupancy_score[idx] = (int8_t)score;
+
+  // Convert confidence into occupancy state.
+  if (score >= 2) {
+    setOccupancy(idx, OCC_OCCUPIED);
+  } else if (score <= -2) {
     setOccupancy(idx, OCC_FREE);
   }
 }
@@ -624,15 +716,40 @@ void MappingNav::forEachNeighbor(uint16_t s, uint16_t *neighbors, uint8_t &count
 }
 
 float MappingNav::edgeCost(uint16_t from, uint16_t to) const {
-  (void)from;
   if (m_inflated_blocked[to]) return INF;
 
-  uint16_t fx = 0, fy = 0, tx = 0, ty = 0;
-  coordOf(from, fx, fy);
-  coordOf(to, tx, ty);
+    uint16_t fx = 0, fy = 0, tx = 0, ty = 0;
+    coordOf(from, fx, fy);
+    coordOf(to, tx, ty);
 
-  const bool diag = (fx != tx) && (fy != ty);
-  float cost = diag ? 1.41421356f : 1.0f;
+    const int32_t dx = (int32_t)tx - (int32_t)fx;
+    const int32_t dy = (int32_t)ty - (int32_t)fy;
+
+    const bool diag = (dx != 0) && (dy != 0);
+
+    // Prevent diagonal movement through the corner of two blocked cells.
+    //
+    // Example:
+    //
+    //   [X] [ ]
+    //   [ ] [R]
+    //
+    // The robot cannot move diagonally from R through the corner
+    // if either adjacent cell is blocked.
+    if (diag) {
+      const uint16_t side_a =
+          indexOf((uint16_t)((int32_t)fx + dx), fy);
+
+      const uint16_t side_b =
+          indexOf(fx, (uint16_t)((int32_t)fy + dy));
+
+      if (m_inflated_blocked[side_a] ||
+          m_inflated_blocked[side_b]) {
+        return INF;
+      }
+    }
+
+    float cost = diag ? 1.41421356f : 1.0f;
 
   // Unknown is traversable but slightly penalized.
   if (getOccupancy(to) == OCC_UNKNOWN) {
